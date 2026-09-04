@@ -27,6 +27,8 @@ VTOP = str(DESIGNS / "vtop.v")
 SVTOP = str(DESIGNS / "svtop.sv")
 WRAPPER = str(DESIGNS / "wrapper.vhd")
 VAND = str(DESIGNS / "vand.v")
+LIB_TOP = str(DESIGNS / "libtop.vhd")
+LIB_LEAF = str(DESIGNS / "lib_leaf.vhd")
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +119,32 @@ async def test_systemverilog_only_top(e2e):
     assert result.startswith("Synthesis OK"), result
 
 
+async def test_cross_library_vhdl_reference(e2e):
+    """Top uses 'library leaf_lib; entity leaf_lib.leaf' to cross into a
+    sibling library — the tsfpga.module.get_modules() per-module-folder
+    library convention. Fails to even analyze without 'libraries'."""
+    result = await server.tsfpga_synthesize(
+        server.SynthesizeInput(
+            sources=[LIB_TOP],
+            libraries={"leaf_lib": [LIB_LEAF]},
+            top="libtop",
+            chip="generic",
+        )
+    )
+    assert result.startswith("Synthesis OK"), result
+
+
+async def test_cross_library_vhdl_reference_fails_without_libraries(e2e):
+    """Same design, but with 'leaf' flattened into the 'sources'/top
+    library instead of its own — GHDL cannot find library 'leaf_lib'."""
+    result = await server.tsfpga_synthesize(
+        server.SynthesizeInput(
+            sources=[LIB_TOP, LIB_LEAF], top="libtop", chip="generic"
+        )
+    )
+    assert result.startswith("Synthesis FAILED"), result
+
+
 async def test_family_rejected_for_generic_chip(e2e):
     result = await server.tsfpga_synthesize(
         server.SynthesizeInput(
@@ -162,9 +190,7 @@ async def test_targets_tool(e2e):
 
 
 async def test_inspect_tool(e2e):
-    result = await server.tsfpga_inspect(
-        server.InspectInput(sources=[COUNTER, VTOP])
-    )
+    result = await server.tsfpga_inspect(server.InspectInput(sources=[COUNTER, VTOP]))
     assert "VHDL entity counter" in result
     assert "generic: WIDTH" in result
     assert "Verilog module vtop" in result

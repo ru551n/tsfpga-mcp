@@ -17,7 +17,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import __version__
 from .capabilities import Capabilities, render_targets
@@ -69,12 +69,30 @@ class SynthesizeInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     sources: list[str] = Field(
+        default_factory=list,
         description=(
-            "HDL source files (.vhd/.vhdl and/or .v/.sv) of the design, in "
-            "any order. All units the top level needs must be covered by "
-            "these files. Base names must be unique across the list."
+            "HDL source files (.vhd/.vhdl and/or .v/.sv) with no explicit "
+            "library: staged into the single library named after 'top'. "
+            "All units the top level needs must be covered by these files "
+            "plus 'libraries'. Base names must be unique within this list "
+            "(they may repeat across different 'libraries' entries)."
         ),
-        min_length=1,
+    )
+    libraries: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Explicit per-library source grouping: VHDL library name -> "
+            "its source files, for designs whose sources must be analyzed "
+            "into more than one VHDL library — e.g. a top level that uses "
+            "'library <name>; entity <name>.<entity>' to cross into a "
+            "sibling library, as produced by tsfpga's own per-module-folder "
+            "library convention (tsfpga.module.get_modules()). Each named "
+            "library's files are staged and GHDL-analyzed as that library. "
+            "Base names must be unique within each library, but may repeat "
+            "across different libraries (including the 'sources' library). "
+            "Combine with 'sources' for files that belong in the (single) "
+            "library named after 'top'."
+        ),
     )
     top: str = Field(
         description=(
@@ -139,16 +157,27 @@ class SynthesizeInput(BaseModel):
         description="Max seconds for this run (default: TSFPGA_MCP_TIMEOUT).",
     )
 
+    @model_validator(mode="after")
+    def _check_has_sources(self) -> SynthesizeInput:
+        if not self.sources and not any(self.libraries.values()):
+            raise ValueError(
+                "Provide at least one source file via 'sources' and/or 'libraries'."
+            )
+        return self
+
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=False))
 async def tsfpga_synthesize(input: SynthesizeInput) -> str:
     """Synthesize a VHDL or Verilog design and return the resource counts.
 
-    Stages the sources into a tsfpga module, runs GHDL analysis + the
-    chip's Yosys synth flow via tsfpga.yosys.project, and returns the
-    aggregated resource counts (LUTs, FFs, DSPs, block RAMs — or raw cell
-    counts for chip='generic') from the utilization report. On failure
-    returns the captured diagnostics."""
+    Stages 'sources' (library named after 'top') and each 'libraries'
+    entry (its own named library) into one tsfpga module per library,
+    runs GHDL analysis + the chip's Yosys synth flow via
+    tsfpga.yosys.project, and returns the aggregated resource counts
+    (LUTs, FFs, DSPs, block RAMs — or raw cell counts for chip='generic')
+    from the utilization report. Use 'libraries' when the design spans
+    multiple VHDL libraries (cross-library 'library x; entity x.y'
+    references). On failure returns the captured diagnostics."""
     try:
         config = _get_config()
         caps = _get_capabilities(config)
@@ -168,6 +197,7 @@ async def tsfpga_synthesize(input: SynthesizeInput) -> str:
                 synthesize,
                 config=config,
                 sources=input.sources,
+                libraries=input.libraries,
                 top=input.top,
                 chip=input.chip,
                 family=input.family,

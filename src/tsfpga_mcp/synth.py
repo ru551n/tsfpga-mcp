@@ -1,10 +1,17 @@
 """Synthesis backend: drives ``tsfpga.yosys.project.YosysNetlistBuild``.
 
-Per synthesis request the server stages the given source files into a
-throwaway ``tsfpga`` module (a flat directory scanned by
-``BaseModule.get_synthesis_files``), wraps it in a one-module
-``ModuleList``, and hands it to the ``generic``/Xilinx/Intel/Microchip
-``YosysNetlistBuild`` subclass matching the requested chip:
+Per synthesis request the server stages the given source files into one
+throwaway ``tsfpga`` module *per VHDL library* (a flat directory per
+library, each scanned by ``BaseModule.get_synthesis_files``), wraps them
+in a ``ModuleList`` (one ``BaseModule`` per library, named accordingly),
+and hands it to the ``generic``/Xilinx/Intel/Microchip
+``YosysNetlistBuild`` subclass matching the requested chip. Files given
+via plain ``sources`` are staged into the single library named after
+``top``; files given via ``libraries`` are staged into the library named
+by their dict key. This mirrors how a real tsfpga project
+(``tsfpga.module.get_modules()``) gives each module folder its own
+library, and lets GHDL resolve cross-library ``library x; entity x.y``
+clauses.
 
 - ``create()`` analyzes the VHDL sources with GHDL.
 - ``build()`` elaborates the top (``ghdl`` yosys command, reading any
@@ -20,6 +27,7 @@ produce a port-level netlist dump (no ``write_json`` step).
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import tempfile
 import time
@@ -83,8 +91,7 @@ CHIPS: dict[str, ChipSpec] = {
         build_class=YosysXilinxNetlistBuild,
         flow="synth_xilinx",
         description=(
-            "Xilinx primitives (LUTs, FDs, RAMB18/36, DSP48) via "
-            "`synth_xilinx`."
+            "Xilinx primitives (LUTs, FDs, RAMB18/36, DSP48) via `synth_xilinx`."
         ),
         families=("xc6s", "xc7", "xcu", "xcup"),
         supports_family=True,
@@ -138,27 +145,40 @@ def _classify(sources: Sequence[str]) -> None:
         raise SynthError("Source file(s) not found: " + ", ".join(missing))
 
 
-def _stage_sources(module_dir: Path, sources: Sequence[str]) -> None:
-    """Copy ``sources`` (from wherever they live) flat into ``module_dir``.
+def _stage_libraries(
+    modules_root: Path, libraries: Mapping[str, Sequence[str]]
+) -> dict[str, Path]:
+    """Copy each library's sources (from wherever they live) into its own
+    flat directory under ``modules_root``, one per library.
 
     tsfpga's ``BaseModule`` scans a module's own directory (non-recursive)
-    for source files, so every given file ends up directly under
-    ``module_dir`` regardless of its original location. Files must
-    therefore have unique base names.
+    for source files, so every file for a given library ends up directly
+    under that library's directory regardless of its original location.
+    Base names must therefore be unique within a library, but may repeat
+    across different libraries (each gets its own directory/GHDL library).
     """
-    module_dir.mkdir(parents=True, exist_ok=True)
-    seen: dict[str, str] = {}
-    for src in sources:
-        path = Path(src)
-        name = path.name
-        if name in seen and seen[name] != str(path):
-            raise SynthError(
-                f"Duplicate source file name {name!r} ({seen[name]} vs "
-                f"{path}); all sources are staged in one flat directory, "
-                "so base names (not full paths) must be unique."
-            )
-        seen[name] = str(path)
-        shutil.copy2(path, module_dir / name)
+    library_dirs: dict[str, Path] = {}
+    for library, lib_sources in libraries.items():
+        if not lib_sources:
+            continue
+        module_dir = modules_root / library
+        module_dir.mkdir(parents=True, exist_ok=True)
+        seen: dict[str, str] = {}
+        for src in lib_sources:
+            path = Path(src)
+            name = path.name
+            if name in seen and seen[name] != str(path):
+                raise SynthError(
+                    f"Duplicate source file name {name!r} in library "
+                    f"{library!r} ({seen[name]} vs {path}); each library "
+                    "is staged in its own flat directory, so base names "
+                    "must be unique within a library (they may repeat "
+                    "across different libraries)."
+                )
+            seen[name] = str(path)
+            shutil.copy2(path, module_dir / name)
+        library_dirs[library] = module_dir
+    return library_dirs
 
 
 def _generic_types_for_top(sources: Sequence[str], top: str) -> dict[str, str]:
@@ -250,9 +270,22 @@ def synthesize(
     generics: Mapping[str, str],
     vhdl_standard: str,
     discard_ffinit: bool,
+    libraries: Mapping[str, Sequence[str]] | None = None,
 ) -> SynthResult:
     """Run one synthesis. Blocking — call via ``asyncio.to_thread``."""
-    _classify(sources)
+    all_libraries: dict[str, list[str]] = {
+        name: list(files) for name, files in (libraries or {}).items()
+    }
+    if sources:
+        all_libraries[top] = list(sources) + all_libraries.get(top, [])
+
+    flat_sources = [src for files in all_libraries.values() for src in files]
+    if not flat_sources:
+        raise SynthError(
+            "No source files given (both 'sources' and 'libraries' are empty)."
+        )
+
+    _classify(flat_sources)
     spec = chip_spec(chip)
 
     build_kwargs: dict[str, Any] = {}
@@ -265,16 +298,15 @@ def synthesize(
             raise SynthError("discard_ffinit is only supported for chip='microchip'.")
         build_kwargs["discard_ffinit"] = True
 
-    typed_generics = _typed_generics(sources, top, generics) if generics else None
+    typed_generics = _typed_generics(flat_sources, top, generics) if generics else None
 
     tmp_root = Path(tempfile.mkdtemp(prefix="tsfpga-mcp-"))
     start = time.monotonic()
     try:
-        module_dir = tmp_root / "modules" / top
-        _stage_sources(module_dir, sources)
-        module = BaseModule(path=module_dir, library_name=top)
+        library_dirs = _stage_libraries(tmp_root / "modules", all_libraries)
         modules = ModuleList()
-        modules.append(module)
+        for library, module_dir in library_dirs.items():
+            modules.append(BaseModule(path=module_dir, library_name=library))
 
         build = spec.build_class(
             name=top,
@@ -343,8 +375,81 @@ def build_success(
     return "\n".join(lines)
 
 
-def build_failure(output: str, elapsed: float) -> str:
-    tail = "\n".join(output.strip().splitlines()[-40:]) or "(no output captured)"
-    return "\n".join(
-        [f"Synthesis FAILED ({elapsed:.1f}s).", "", "Diagnostics:", tail]
+def _error_context_lines(lines: Sequence[str], context: int = 2) -> list[str] | None:
+    """Lines around every "error" occurrence, in order, de-duplicated.
+
+    A blind tail can bury the actual root-cause error under repeated
+    benign warnings/notes that happen to follow it (e.g. GHDL emitting the
+    same "note: found RAM" block once per elaborated instance). Surfacing
+    every "error"-containing line (plus a little context) instead makes
+    sure the real cause is always visible. Returns None when the output
+    contains no line mentioning "error" at all (e.g. a bare exception),
+    so the caller can fall back to a plain tail.
+    """
+    error_idxs = [i for i, line in enumerate(lines) if "error" in line.lower()]
+    if not error_idxs:
+        return None
+
+    keep: set[int] = set()
+    for idx in error_idxs:
+        keep.update(range(max(0, idx - context), min(len(lines), idx + context + 1)))
+
+    result: list[str] = []
+    previous: int | None = None
+    for idx in sorted(keep):
+        if previous is not None and idx != previous + 1:
+            result.append("...")
+        result.append(lines[idx])
+        previous = idx
+    return result
+
+
+_MISSING_LIBRARY_RE = re.compile(
+    r"""cannot\ find\ resource\ library\ "([^"]+)"
+      | failed\ to\ find\ library\ '([^']+)'""",
+    re.VERBOSE,
+)
+
+
+def _missing_library_hint(output: str) -> str | None:
+    """A one-line nudge when GHDL failed because a referenced VHDL library
+    was never analyzed at all (as opposed to a real syntax/semantic error).
+
+    This is the single most common first-time mistake with this tool: a
+    top level that cross-references a sibling library (tsfpga's own
+    per-module-folder convention, ``library <name>; entity <name>.<x>``)
+    but whose source was passed flat via ``sources`` instead of under its
+    own ``libraries`` entry. GHDL's own error ("cannot find resource
+    library"/"failed to find library") doesn't mention this tool's
+    ``libraries`` parameter, so point at it explicitly instead of leaving
+    the caller to rediscover the fix from GHDL wording alone.
+    """
+    names = dict.fromkeys(
+        next(g for g in match.groups() if g is not None)
+        for match in _MISSING_LIBRARY_RE.finditer(output)
     )
+    if not names:
+        return None
+    quoted = ", ".join(f"'{name}'" for name in names)
+    return (
+        f"Hint: GHDL could not find librar{'y' if len(names) == 1 else 'ies'} "
+        f"{quoted} — if the design's sources span more than one VHDL "
+        "library (e.g. a top level using 'library <name>; entity "
+        "<name>.<entity>' to cross into a sibling library, as produced by "
+        "tsfpga's own per-module-folder convention), pass that library's "
+        "source files via the 'libraries' parameter instead of (or in "
+        "addition to) 'sources'."
+    )
+
+
+def build_failure(output: str, elapsed: float) -> str:
+    lines = output.strip().splitlines()
+    selected = _error_context_lines(lines) if lines else None
+    if selected is None:
+        selected = lines[-40:]
+    diagnostics = "\n".join(selected) or "(no output captured)"
+    result = [f"Synthesis FAILED ({elapsed:.1f}s).", "", "Diagnostics:", diagnostics]
+    hint = _missing_library_hint(output)
+    if hint is not None:
+        result += ["", hint]
+    return "\n".join(result)

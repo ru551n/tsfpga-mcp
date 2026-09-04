@@ -112,9 +112,7 @@ class TestProbes:
     """The yosys-config / ghdl --dispconfig fallbacks (driving _run_probe)."""
 
     def _which(self, monkeypatch, names: dict[str, str | None]):
-        monkeypatch.setattr(
-            config.shutil, "which", lambda name: names.get(name)
-        )
+        monkeypatch.setattr(config.shutil, "which", lambda name: names.get(name))
 
     def test_datdir_fallback_finds_plugin(self, monkeypatch, tmp_path):
         datdir = tmp_path / "share" / "yosys"
@@ -125,9 +123,9 @@ class TestProbes:
         monkeypatch.setattr(
             config,
             "_run_probe",
-            lambda argv: str(datdir)
-            if argv == ["/usr/bin/yosys-config", "--datdir"]
-            else None,
+            lambda argv: (
+                str(datdir) if argv == ["/usr/bin/yosys-config", "--datdir"] else None
+            ),
         )
         config_ = load_config({})
         assert config_.plugin == plugin
@@ -141,9 +139,9 @@ class TestProbes:
         monkeypatch.setattr(
             config,
             "_run_probe",
-            lambda argv: str(datdir)
-            if argv == ["/usr/bin/yosys-config", "--datdir"]
-            else None,
+            lambda argv: (
+                str(datdir) if argv == ["/usr/bin/yosys-config", "--datdir"] else None
+            ),
         )
         assert load_config({}).plugin == plugin
 
