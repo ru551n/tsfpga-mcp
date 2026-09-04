@@ -1,0 +1,67 @@
+[project]
+name = "tsfpga-mcp"
+version = "0.1.0"
+description = "MCP server for multi-vendor netlist synthesis (generic/Xilinx/Intel/Microchip resource counts), built on tsfpga's Yosys + GHDL flows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    # FastMCP (mcp.server.fastmcp) was removed in mcp 2.x — pin to 1.x.
+    "mcp>=1.29,<2",
+    "pydantic>=2.0",
+    # Yosys netlist builds (tsfpga.yosys.project) — merged to ru551n/tsfpga:main,
+    # not yet released to PyPI or merged upstream. Pin to a commit/branch on the
+    # fork; bump alongside deliberate tsfpga upgrades.
+    "tsfpga @ git+https://github.com/ru551n/tsfpga.git@main",
+]
+
+[project.scripts]
+tsfpga-mcp = "tsfpga_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+# The test designs are HDL *fixtures*, not Python: exempt from lint.
+extend-exclude = ["tests/designs"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "C4",
+    "RUF",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tsfpga.*"
+ignore_missing_imports = true

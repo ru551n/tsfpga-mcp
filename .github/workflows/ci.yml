@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The ru551n/hdl-docker image bundles yosys, the ghdl yosys plugin and the
+# compiled GHDL std/ieee libraries (plus nvc, unused here), so the full
+# suite (including the end-to-end synthesis tests) runs without any extra
+# setup. The server discovers the plugin (yosys-config --datdir) and the
+# GHDL prefix (ghdl --dispconfig) on its own; no TSFPGA_MCP_* variables
+# are set. Pinned to a specific tag for reproducibility; bump alongside
+# deliberate hdl-docker upgrades.
+jobs:
+  test:
+    name: Tests (ru551n/hdl-docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ru551n/hdl-docker:1.1.0
+      # The image's default user (hdl) can't apt-get install; run as root.
+      options: --user root
+    steps:
+      - name: Install prerequisites (git, curl)
+        run: |
+          set -e
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            (command -v git  || apt-get install -y --no-install-recommends git)
+            (command -v curl || apt-get install -y --no-install-recommends curl)
+          fi
+          command -v git
+          command -v curl
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type-check
+        run: uv run mypy
+      - name: Run tests
+        run: uv run pytest -q
+      - name: Assert the end-to-end tests really ran
+        # Guards against the e2e tests being silently skipped (e.g. if the
+        # image ever stops shipping the compiled GHDL std/ieee libraries):
+        # the whole point of this job is a real yosys + ghdl + plugin run.
+        run: >
+          uv run python -c
+          "import os; from tests.conftest import e2e_available;
+          assert e2e_available(dict(os.environ)),
+          'e2e setup (yosys + ghdl plugin + GHDL std/ieee libs) not available
+          in the container'"
