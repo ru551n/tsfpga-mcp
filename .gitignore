@@ -6,10 +6,6 @@ build/
 dist/
 .venv/
 
-# Yosys synthesis outputs
-*.json
-yosynth_out/
-
 # Editor/OS
 .vscode/
 .idea/
