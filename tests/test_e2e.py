@@ -14,6 +14,7 @@ the ``e2e`` fixture in conftest. The designs under tests/designs cover:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,17 @@ async def test_family_rejected_for_generic_chip(e2e):
     assert "does not accept a family" in result
 
 
+async def test_family_rejected_when_unknown_for_chip(e2e):
+    result = await server.tsfpga_synthesize(
+        server.SynthesizeInput(
+            sources=[COUNTER], top="counter", chip="xilinx", family="bogus"
+        )
+    )
+    assert result.startswith("Error:")
+    assert "Unknown family 'bogus'" in result
+    assert "xc7" in result
+
+
 async def test_discard_ffinit_rejected_for_non_microchip(e2e):
     result = await server.tsfpga_synthesize(
         server.SynthesizeInput(
@@ -193,4 +205,24 @@ async def test_inspect_tool(e2e):
     result = await server.tsfpga_inspect(server.InspectInput(sources=[COUNTER, VTOP]))
     assert "VHDL entity counter" in result
     assert "generic: WIDTH" in result
+    assert "Verilog module vtop" in result
+
+
+async def test_inspect_tool_does_not_require_config(monkeypatch):
+    """tsfpga_inspect is a pure static scan; it must work even when the
+    synthesis config (ghdl plugin, yosys, ...) is missing/broken, i.e.
+    without the ``e2e``/``config`` fixtures."""
+    monkeypatch.setenv("TSFPGA_MCP_GHDL_PLUGIN", "/no/such/ghdl.so")
+    monkeypatch.setenv("TSFPGA_MCP_YOSYS", "/no/such/yosys")
+    monkeypatch.setenv("TSFPGA_MCP_GHDL", "/no/such/ghdl")
+
+    # Sanity check: this env really would fail _get_config().
+    from tsfpga_mcp.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError):
+        load_config(dict(os.environ))
+
+    result = await server.tsfpga_inspect(server.InspectInput(sources=[COUNTER, VTOP]))
+    assert "Configuration error" not in result
+    assert "VHDL entity counter" in result
     assert "Verilog module vtop" in result

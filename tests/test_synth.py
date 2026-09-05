@@ -16,6 +16,7 @@ from tsfpga_mcp.synth import (
     _stage_libraries,
     _typed_generic,
     _typed_generics,
+    _validate_family,
     build_failure,
     build_success,
     chip_spec,
@@ -39,6 +40,27 @@ class TestChipSpec:
 
     def test_xilinx_supports_family(self):
         assert chip_spec("xilinx").supports_family is True
+
+
+class TestValidateFamily:
+    def test_no_family_is_fine_for_any_chip(self):
+        _validate_family("generic", chip_spec("generic"), None)
+        _validate_family("xilinx", chip_spec("xilinx"), None)
+
+    def test_family_rejected_when_chip_does_not_support_one(self):
+        with pytest.raises(SynthError, match="does not accept a family"):
+            _validate_family("generic", chip_spec("generic"), "xc7")
+
+    def test_known_family_accepted(self):
+        _validate_family("xilinx", chip_spec("xilinx"), "xc7")
+
+    @pytest.mark.parametrize("chip", ["xilinx", "intel", "microchip"])
+    def test_unknown_family_rejected(self, chip):
+        spec = chip_spec(chip)
+        with pytest.raises(SynthError, match="Unknown family 'bogus'") as excinfo:
+            _validate_family(chip, spec, "bogus")
+        for known_family in spec.families:
+            assert known_family in str(excinfo.value)
 
 
 class TestClassify:
