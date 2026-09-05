@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,7 +25,7 @@ from .config import Config, ConfigError, load_config
 from .inspect import inspect_sources, render_inspection
 from .synth import SynthError, build_failure, build_success, chip_spec, synthesize
 
-mcp = FastMCP(
+mcp = MCPServer(
     "tsfpga_mcp",
     instructions=(
         "Synthesize VHDL and Verilog designs with tsfpga's Yosys + GHDL "
@@ -166,7 +166,7 @@ class SynthesizeInput(BaseModel):
         return self
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=False))
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
 async def tsfpga_synthesize(input: SynthesizeInput) -> str:
     """Synthesize a VHDL or Verilog design and return the resource counts.
 
@@ -224,7 +224,7 @@ async def tsfpga_synthesize(input: SynthesizeInput) -> str:
     return build_failure(result.output, result.elapsed)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 async def tsfpga_status() -> str:
     """Report the synthesis setup: yosys version, available synthesis
     flows, ghdl plugin path, GHDL library prefix, ghdl binary and default
@@ -265,7 +265,7 @@ class InspectInput(BaseModel):
     )
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 async def tsfpga_inspect(input: InspectInput) -> str:
     """List the synthesizable units in the given sources: VHDL entities
     with their architectures and generics (name, type, default), Verilog
@@ -280,7 +280,7 @@ async def tsfpga_inspect(input: InspectInput) -> str:
     return render_inspection(inspect_sources(input.sources))
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 async def tsfpga_targets() -> str:
     """List the chip targets this server can synthesize for: the yosys
     synthesis flow (synth, synth_xilinx, synth_intel, synth_microchip) of

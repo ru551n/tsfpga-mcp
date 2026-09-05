@@ -6,9 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
-    # FastMCP (mcp.server.fastmcp) was removed in mcp 2.x — pin to 1.x.
-    "mcp>=1.29,<2",
-    "pydantic>=2.0",
+    "mcp>=2.1,<3",
+    "pydantic>=2.12",
     # Yosys netlist builds (tsfpga.yosys.project) — merged to ru551n/tsfpga:main,
     # not yet released to PyPI or merged upstream. Pin to a commit/branch on the
     # fork; bump alongside deliberate tsfpga upgrades.
