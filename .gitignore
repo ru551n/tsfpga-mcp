@@ -13,3 +13,6 @@ dist/
 
 # Agent state
 .maki/
+
+# Test fixture build output
+tests/fixture_project/tsfpga_mcp_out/

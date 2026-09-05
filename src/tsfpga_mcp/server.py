@@ -23,6 +23,8 @@ from . import __version__
 from .capabilities import Capabilities, render_targets
 from .config import Config, ConfigError, load_config
 from .inspect import inspect_sources, render_inspection
+from .project_config import ProjectConfig, ProjectConfigError, load_project_config
+from .project_runner import RunTimeoutError, run_build_script
 from .synth import SynthError, build_failure, build_success, chip_spec, synthesize
 
 mcp = MCPServer(
@@ -35,12 +37,20 @@ mcp = MCPServer(
         "chips/families this yosys supports; then tsfpga_synthesize with "
         "top, chip (generic/xilinx/intel/microchip) and family where "
         "needed, and generic overrides. Ask the user when the top, chip, "
-        "family or generic value cannot be inferred."
+        "family or generic value cannot be inferred. tsfpga_synthesize "
+        "stages arbitrary sources ad hoc, in-process, no project needed. "
+        "For a real project's own netlist builds (its modules, generics, "
+        "IP resolved exactly as its build does), use the tsfpga_project_* "
+        "tools instead, which run the project's own build script (default: "
+        "build.py in the current working directory, override with "
+        "TSFPGA_MCP_PROJECT_DIR/TSFPGA_MCP_BUILD_SCRIPT) as a subprocess; "
+        "tsfpga_project_status reports what it resolved to."
     ),
 )
 
 _config: Config | None = None
 _capabilities: Capabilities | None = None
+_project_config: ProjectConfig | None = None
 
 
 def _get_config() -> Config:
@@ -57,9 +67,18 @@ def _get_capabilities(config: Config) -> Capabilities:
     return _capabilities
 
 
+def _get_project_config() -> ProjectConfig:
+    global _project_config
+    if _project_config is None:
+        _project_config = load_project_config()
+    return _project_config
+
+
 def _err(exc: Exception) -> str:
-    if isinstance(exc, ConfigError):
+    if isinstance(exc, (ConfigError, ProjectConfigError)):
         return f"Configuration error: {exc}"
+    if isinstance(exc, RunTimeoutError):
+        return f"Timeout: {exc}"
     return f"Error: {exc}"
 
 
@@ -296,6 +315,153 @@ async def tsfpga_targets() -> str:
     if caps.probe_error:
         return f"Error: {caps.probe_error}"
     return render_targets(caps)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+async def tsfpga_project_status() -> str:
+    """Report the project-mode setup: project dir, build script, resolved
+    interpreter, projects path, default timeout and any extra args. Defaults
+    to build.py in the current working directory; call this first when a
+    project build/list fails with configuration-looking errors, or to check
+    what it resolved to. Project mode drives the project's own build script
+    as a subprocess (same as running it from a terminal); it is for real
+    project builds with real modules/generics/IP, as opposed to
+    tsfpga_synthesize, which stages arbitrary source files ad hoc in-process
+    with no project required."""
+    try:
+        config = _get_project_config()
+    except ProjectConfigError as exc:
+        return _err(exc)
+    lines = [
+        "tsfpga-mcp project mode",
+        f"- project dir   : {config.project_dir}",
+        f"- build script  : {config.build_script}",
+        f"- interpreter   : {config.python}",
+        f"- projects path : {config.projects_path}",
+        f"- timeout       : {config.timeout:.0f}s",
+    ]
+    if config.extra_args:
+        lines.append(f"- extra args    : {' '.join(config.extra_args)}")
+    return "\n".join(lines)
+
+
+class ListBuildsInput(BaseModel):
+    """Input for tsfpga_project_list_builds."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    netlist_builds: bool = Field(
+        default=True,
+        description=(
+            "List netlist (Yosys) build projects instead of top-level "
+            "(Vivado) build projects. Netlist builds are what tsfpga-mcp "
+            "can report resource counts for; this is the common case."
+        ),
+    )
+    project_filters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard filters for project names, e.g. ['*canny*']. Empty "
+            "list lists all projects."
+        ),
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+async def tsfpga_project_list_builds(input: ListBuildsInput) -> str:
+    """List the project's own build projects by running its build script
+    with --list-only (default: build.py in the current working directory).
+    Use this to find project name filters before tsfpga_project_build."""
+    try:
+        config = _get_project_config()
+    except ProjectConfigError as exc:
+        return _err(exc)
+    args = ["--list-only", "--projects-path", str(config.projects_path)]
+    if input.netlist_builds:
+        args.append("--netlist-builds")
+    args.extend(input.project_filters)
+    try:
+        result = await run_build_script(config, args)
+    except RunTimeoutError as exc:
+        return _err(exc)
+    if not result.ok:
+        return f"Listing failed (exit {result.returncode}):\n" + result.summary()
+    return result.summary()
+
+
+class BuildInput(BaseModel):
+    """Input for tsfpga_project_build."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    project_filters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard filters for which projects to build, e.g. "
+            "['*canny*']. Empty list builds all projects — use "
+            "tsfpga_project_list_builds first to see what that means."
+        ),
+    )
+    netlist_builds: bool = Field(
+        default=True,
+        description=(
+            "Build netlist (Yosys) build projects instead of top-level "
+            "(Vivado) build projects. Netlist builds are synthesis-only and "
+            "produce the resource-count utilization report."
+        ),
+    )
+    use_existing_project: bool = Field(
+        default=True,
+        description=(
+            "Reuse an existing project directory if present, creating it "
+            "only if missing. Much faster when iterating. Set to False to "
+            "force a clean re-create."
+        ),
+    )
+    num_parallel_builds: int | None = Field(default=None, ge=1)
+    num_threads_per_build: int | None = Field(default=None, ge=1)
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this build only.",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def tsfpga_project_build(input: BuildInput) -> str:
+    """Build project(s) by running the project's own build script (default:
+    build.py in the current working directory). Unlike tsfpga_synthesize
+    (which stages arbitrary source files ad hoc, no project required), this
+    drives the real project exactly as its build script would from a
+    terminal: modules, generics and IP are resolved the same way the
+    project's regular builds do. Use tsfpga_project_list_builds first to
+    find project name filters. Resource counts are written to
+    '<name>_utilization.txt' under the project's output path and are also
+    echoed in this build's output."""
+    try:
+        config = _get_project_config()
+    except ProjectConfigError as exc:
+        return _err(exc)
+    args = ["--projects-path", str(config.projects_path), "--no-color"]
+    if input.netlist_builds:
+        args.append("--netlist-builds")
+    if input.use_existing_project:
+        args.append("--use-existing-project")
+    if input.num_parallel_builds is not None:
+        args += ["--num-parallel-builds", str(input.num_parallel_builds)]
+    if input.num_threads_per_build is not None:
+        args += ["--num-threads-per-build", str(input.num_threads_per_build)]
+    args.extend(input.project_filters)
+    try:
+        result = await run_build_script(config, args, timeout=input.timeout)
+    except RunTimeoutError as exc:
+        return _err(exc)
+    header = (
+        "Build succeeded.\n"
+        if result.ok
+        else f"Build failed (exit {result.returncode}).\n"
+    )
+    return header + result.summary()
 
 
 def main() -> None:
