@@ -24,7 +24,7 @@ async def _reset_project_config(monkeypatch):
     monkeypatch.setattr(server, "_project_config", None)
 
 
-async def _inject_project_env(monkeypatch, config_env):
+async def _inject_project_env(monkeypatch, e2e_config):
     monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(FIXTURE_PROJECT))
     # The fixture has no venv of its own; use this server's own interpreter,
     # which already has tsfpga installed (a dependency of tsfpga-mcp itself).
@@ -37,15 +37,20 @@ async def _inject_project_env(monkeypatch, config_env):
     ):
         monkeypatch.delenv(key, raising=False)
     # module_counter.py reads these directly to locate the ghdl-yosys-plugin,
-    # the same way tsfpga_mcp.config does for the ad-hoc tsfpga_synthesize tool.
-    for key in ("TSFPGA_MCP_GHDL_PLUGIN", "TSFPGA_MCP_GHDL_PREFIX"):
-        if key in config_env:
-            monkeypatch.setenv(key, config_env[key])
+    # using the already-*resolved* plugin/prefix from the e2e fixture's Config
+    # (probed via yosys-config/ghdl --dispconfig the same way tsfpga_mcp.config
+    # does for the ad-hoc tsfpga_synthesize tool) -- not the raw env, which may
+    # not have TSFPGA_MCP_GHDL_PLUGIN/_PREFIX set explicitly at all.
+    monkeypatch.setenv("TSFPGA_MCP_GHDL_PLUGIN", str(e2e_config.plugin))
+    if e2e_config.ghdl_prefix:
+        monkeypatch.setenv("TSFPGA_MCP_GHDL_PREFIX", str(e2e_config.ghdl_prefix))
+    else:
+        monkeypatch.delenv("TSFPGA_MCP_GHDL_PREFIX", raising=False)
 
 
-async def test_project_status(e2e, monkeypatch, config_env):
+async def test_project_status(e2e, monkeypatch):
     await _reset_project_config(monkeypatch)
-    await _inject_project_env(monkeypatch, config_env)
+    await _inject_project_env(monkeypatch, e2e)
 
     result = await server.tsfpga_project_status()
 
@@ -53,9 +58,9 @@ async def test_project_status(e2e, monkeypatch, config_env):
     assert "build_fpga.py" in result
 
 
-async def test_list_builds(e2e, monkeypatch, config_env):
+async def test_list_builds(e2e, monkeypatch):
     await _reset_project_config(monkeypatch)
-    await _inject_project_env(monkeypatch, config_env)
+    await _inject_project_env(monkeypatch, e2e)
 
     result = await server.tsfpga_project_list_builds(
         server.ListBuildsInput(netlist_builds=True)
@@ -65,9 +70,9 @@ async def test_list_builds(e2e, monkeypatch, config_env):
     assert "Listed 1 builds" in result
 
 
-async def test_list_builds_filter_no_match(e2e, monkeypatch, config_env):
+async def test_list_builds_filter_no_match(e2e, monkeypatch):
     await _reset_project_config(monkeypatch)
-    await _inject_project_env(monkeypatch, config_env)
+    await _inject_project_env(monkeypatch, e2e)
 
     result = await server.tsfpga_project_list_builds(
         server.ListBuildsInput(netlist_builds=True, project_filters=["nope_*"])
@@ -76,11 +81,9 @@ async def test_list_builds_filter_no_match(e2e, monkeypatch, config_env):
     assert "Listed 0 builds" in result
 
 
-async def test_build_succeeds_and_reports_resources(
-    e2e, monkeypatch, config_env, tmp_path
-):
+async def test_build_succeeds_and_reports_resources(e2e, monkeypatch, tmp_path):
     await _reset_project_config(monkeypatch)
-    await _inject_project_env(monkeypatch, config_env)
+    await _inject_project_env(monkeypatch, e2e)
     monkeypatch.setenv("TSFPGA_MCP_PROJECTS_PATH", str(tmp_path / "projects"))
 
     result = await server.tsfpga_project_build(
@@ -91,11 +94,9 @@ async def test_build_succeeds_and_reports_resources(
     assert "$_DFF_P_" in result
 
 
-async def test_build_no_matching_projects_still_succeeds(
-    e2e, monkeypatch, config_env, tmp_path
-):
+async def test_build_no_matching_projects_still_succeeds(e2e, monkeypatch, tmp_path):
     await _reset_project_config(monkeypatch)
-    await _inject_project_env(monkeypatch, config_env)
+    await _inject_project_env(monkeypatch, e2e)
     monkeypatch.setenv("TSFPGA_MCP_PROJECTS_PATH", str(tmp_path / "projects"))
 
     result = await server.tsfpga_project_build(
