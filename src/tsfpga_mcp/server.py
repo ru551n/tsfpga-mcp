@@ -196,7 +196,15 @@ async def tsfpga_synthesize(input: SynthesizeInput) -> str:
     (LUTs, FFs, DSPs, block RAMs — or raw cell counts for chip='generic')
     from the utilization report. Use 'libraries' when the design spans
     multiple VHDL libraries (cross-library 'library x; entity x.y'
-    references). On failure returns the captured diagnostics."""
+    references). On failure returns the captured diagnostics.
+
+    'family' is optional even for chips that support one (xilinx, intel,
+    microchip): it is never required, but when omitted the underlying
+    yosys flow falls back to its own default rather than tsfpga-mcp
+    picking one — e.g. synth_xilinx produces a 7-series-compatible
+    (xc7-like) netlist, and synth_intel defaults to MAX10. That default
+    may not match the resources of the family you actually care about,
+    so pass 'family' explicitly whenever the target is known."""
     try:
         config = _get_config()
         caps = _get_capabilities(config)
@@ -227,10 +235,14 @@ async def tsfpga_synthesize(input: SynthesizeInput) -> str:
             ),
             timeout=timeout,
         )
-    except (ConfigError, SynthError) as exc:
+    except ConfigError as exc:
+        return _err(exc)
+    except SynthError as exc:
         return f"Error: {exc}"
     except TimeoutError:
         return f"Error: synthesis exceeded the {timeout:.0f}s timeout."
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
 
     if result.success:
         return build_success(
@@ -291,11 +303,9 @@ async def tsfpga_inspect(input: InspectInput) -> str:
     modules with their parameters (name, default). Use this before
     tsfpga_synthesize to pick the top level and to find out which
     generic values exist; if there are several architectures for the top
-    entity or no obvious chip/family, ask the user."""
-    try:
-        _get_config()
-    except ConfigError as exc:
-        return _err(exc)
+    entity or no obvious chip/family, ask the user. This is a pure static
+    scan (regex-based), so it works even without a working yosys/ghdl
+    synthesis setup."""
     return render_inspection(inspect_sources(input.sources))
 
 
@@ -430,7 +440,10 @@ class BuildInput(BaseModel):
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
 async def tsfpga_project_build(input: BuildInput) -> str:
     """Build project(s) by running the project's own build script (default:
-    build.py/build_fpga.py in the current working directory). Unlike tsfpga_synthesize
+    build.py/build_fpga.py in the current working directory). Despite the
+    name, this defaults to netlist-only (Yosys synthesis) builds, not full
+    top-level (e.g. Vivado) builds: 'netlist_builds' defaults to True. Set
+    it to False to run top-level builds instead. Unlike tsfpga_synthesize
     (which stages arbitrary source files ad hoc, no project required), this
     drives the real project exactly as its build script would from a
     terminal: modules, generics and IP are resolved the same way the
@@ -440,22 +453,23 @@ async def tsfpga_project_build(input: BuildInput) -> str:
     echoed in this build's output."""
     try:
         config = _get_project_config()
+        args = ["--projects-path", str(config.projects_path), "--no-color"]
+        if input.netlist_builds:
+            args.append("--netlist-builds")
+        if input.use_existing_project:
+            args.append("--use-existing-project")
+        if input.num_parallel_builds is not None:
+            args += ["--num-parallel-builds", str(input.num_parallel_builds)]
+        if input.num_threads_per_build is not None:
+            args += ["--num-threads-per-build", str(input.num_threads_per_build)]
+        args.extend(input.project_filters)
+        result = await run_build_script(config, args, timeout=input.timeout)
     except ProjectConfigError as exc:
         return _err(exc)
-    args = ["--projects-path", str(config.projects_path), "--no-color"]
-    if input.netlist_builds:
-        args.append("--netlist-builds")
-    if input.use_existing_project:
-        args.append("--use-existing-project")
-    if input.num_parallel_builds is not None:
-        args += ["--num-parallel-builds", str(input.num_parallel_builds)]
-    if input.num_threads_per_build is not None:
-        args += ["--num-threads-per-build", str(input.num_threads_per_build)]
-    args.extend(input.project_filters)
-    try:
-        result = await run_build_script(config, args, timeout=input.timeout)
     except RunTimeoutError as exc:
         return _err(exc)
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
     header = (
         "Build succeeded.\n"
         if result.ok

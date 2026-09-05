@@ -92,6 +92,22 @@ npx @modelcontextprotocol/inspector \
 | `TSFPGA_MCP_GHDL_PREFIX` | dir containing GHDL's compiled `std/`, `ieee/`, `src/` libraries | unset (falls back to `GHDL_PREFIX`, then `ghdl --dispconfig`) |
 | `TSFPGA_MCP_TIMEOUT` | max seconds per synthesis | `300` |
 
+### Project mode (env vars)
+
+These configure the `tsfpga_project_*` tools, which drive a real project's
+*own* build script (e.g. `build.py`/`build_fpga.py`) as a subprocess, as
+opposed to `tsfpga_synthesize`'s ad hoc, in-process staging of loose source
+files. See `tsfpga_project_status` to check what a given setup resolves to.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `TSFPGA_MCP_PROJECT_DIR` | directory containing the project's build script | the server's current working directory |
+| `TSFPGA_MCP_BUILD_SCRIPT` | path to the build script, relative to `TSFPGA_MCP_PROJECT_DIR` unless absolute | whichever of `build.py`/`build_fpga.py` exists in the project dir (`build.py` wins if both do) |
+| `TSFPGA_MCP_PROJECT_PYTHON` | interpreter used to run the build script | the project's own `.venv`/`venv` first, else `PATH` with this server's own venv excluded, else `sys.executable` |
+| `TSFPGA_MCP_PROJECTS_PATH` | `--projects-path` passed to the build script | `<project dir>/tsfpga_mcp_out/projects` |
+| `TSFPGA_MCP_PROJECT_TIMEOUT` | max seconds for one build script invocation | `600` |
+| `TSFPGA_MCP_PROJECT_EXTRA_ARGS` | extra arguments appended, verbatim (shell-split), to every build script invocation | unset |
+
 ## Tools
 
 | Tool | What it does |
@@ -100,6 +116,9 @@ npx @modelcontextprotocol/inspector \
 | `tsfpga_inspect` | Static scan of the sources: VHDL entities with architectures and generics (name/type/default), Verilog modules with parameters, plus ambiguities. Nothing is compiled. |
 | `tsfpga_targets` | The chip targets this server can synthesize for: per chip, the yosys flow, whether it exists in the installed yosys, and the known device families. |
 | `tsfpga_status` | Server config: yosys version, available flows, plugin path, `GHDL_PREFIX`, timeout. Call it first when things look misconfigured. |
+| `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call it first to confirm what it resolved to. |
+| `tsfpga_project_list_builds` | Lists the project's own build projects (`build.py --list-only`), netlist builds by default. Use to find project name filters. |
+| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). |
 
 ### Example
 

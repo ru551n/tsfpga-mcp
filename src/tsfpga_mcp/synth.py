@@ -125,6 +125,21 @@ def chip_spec(chip: str) -> ChipSpec:
         raise SynthError(f"Unknown chip {chip!r}; known chips: {known}") from None
 
 
+def _validate_family(chip: str, spec: ChipSpec, family: str | None) -> None:
+    """Raise ``SynthError`` for a family that the chip cannot accept, or
+    that isn't one of its known device families (a typo'd family would
+    otherwise proceed silently into a deep, confusing yosys failure)."""
+    if family is None:
+        return
+    if not spec.supports_family:
+        raise SynthError(f"chip {chip!r} does not accept a family.")
+    if family and spec.families and family not in spec.families:
+        known = ", ".join(spec.families)
+        raise SynthError(
+            f"Unknown family {family!r} for chip {chip!r}; known families: {known}."
+        )
+
+
 @dataclass
 class SynthResult:
     success: bool
@@ -288,10 +303,9 @@ def synthesize(
     _classify(flat_sources)
     spec = chip_spec(chip)
 
+    _validate_family(chip, spec, family)
     build_kwargs: dict[str, Any] = {}
     if family is not None:
-        if not spec.supports_family:
-            raise SynthError(f"chip {chip!r} does not accept a family.")
         build_kwargs["family"] = family
     if discard_ffinit:
         if chip != "microchip":
