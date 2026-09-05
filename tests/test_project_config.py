@@ -74,6 +74,25 @@ def test_env_overrides(monkeypatch, project):
     assert cfg.extra_args == ["--no-color", "-p", "4"]
 
 
+def test_build_script_defaults_to_build_fpga_py_if_no_build_py(monkeypatch, tmp_path):
+    d = tmp_path / "fpga_proj"
+    d.mkdir()
+    (d / "build_fpga.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(d))
+    cfg = load_project_config()
+    assert cfg.build_script == d / "build_fpga.py"
+
+
+def test_build_script_prefers_build_py_over_build_fpga_py(monkeypatch, tmp_path):
+    d = tmp_path / "both_proj"
+    d.mkdir()
+    (d / "build.py").write_text("", encoding="utf-8")
+    (d / "build_fpga.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(d))
+    cfg = load_project_config()
+    assert cfg.build_script == d / "build.py"
+
+
 def test_build_script_absolute_path(monkeypatch, project, tmp_path):
     other = tmp_path / "elsewhere.py"
     other.write_text("", encoding="utf-8")

@@ -42,8 +42,8 @@ mcp = MCPServer(
         "For a real project's own netlist builds (its modules, generics, "
         "IP resolved exactly as its build does), use the tsfpga_project_* "
         "tools instead, which run the project's own build script (default: "
-        "build.py in the current working directory, override with "
-        "TSFPGA_MCP_PROJECT_DIR/TSFPGA_MCP_BUILD_SCRIPT) as a subprocess; "
+        "build.py/build_fpga.py in the current working directory, override "
+        "with TSFPGA_MCP_PROJECT_DIR/TSFPGA_MCP_BUILD_SCRIPT) as a subprocess; "
         "tsfpga_project_status reports what it resolved to."
     ),
 )
@@ -321,7 +321,7 @@ async def tsfpga_targets() -> str:
 async def tsfpga_project_status() -> str:
     """Report the project-mode setup: project dir, build script, resolved
     interpreter, projects path, default timeout and any extra args. Defaults
-    to build.py in the current working directory; call this first when a
+    to build.py/build_fpga.py in the current working directory; call this first when a
     project build/list fails with configuration-looking errors, or to check
     what it resolved to. Project mode drives the project's own build script
     as a subprocess (same as running it from a terminal); it is for real
@@ -370,7 +370,7 @@ class ListBuildsInput(BaseModel):
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 async def tsfpga_project_list_builds(input: ListBuildsInput) -> str:
     """List the project's own build projects by running its build script
-    with --list-only (default: build.py in the current working directory).
+    with --list-only (default: build.py/build_fpga.py in the current working directory).
     Use this to find project name filters before tsfpga_project_build."""
     try:
         config = _get_project_config()
@@ -430,7 +430,7 @@ class BuildInput(BaseModel):
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
 async def tsfpga_project_build(input: BuildInput) -> str:
     """Build project(s) by running the project's own build script (default:
-    build.py in the current working directory). Unlike tsfpga_synthesize
+    build.py/build_fpga.py in the current working directory). Unlike tsfpga_synthesize
     (which stages arbitrary source files ad hoc, no project required), this
     drives the real project exactly as its build script would from a
     terminal: modules, generics and IP are resolved the same way the

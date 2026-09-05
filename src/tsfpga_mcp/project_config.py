@@ -14,7 +14,9 @@ drives a project's own ``run.py`` rather than importing VUnit directly.
                                   working directory).
 ``TSFPGA_MCP_BUILD_SCRIPT``      path to the build script, relative to
                                   ``TSFPGA_MCP_PROJECT_DIR`` unless absolute
-                                  (default: ``build.py``).
+                                  (default: whichever of ``build.py``/
+                                  ``build_fpga.py`` exists in the project
+                                  dir; ``build.py`` wins if both do).
 ``TSFPGA_MCP_PROJECT_PYTHON``    interpreter used to run the build script
                                   (default: resolved the same way vunit-mcp
                                   resolves its target project's interpreter
@@ -108,13 +110,31 @@ def _resolve_python(project_dir: Path, env: Mapping[str, str]) -> str:
     return sys.executable
 
 
+_DEFAULT_BUILD_SCRIPT_NAMES = ("build.py", "build_fpga.py")
+
+
+def _default_build_script(project_dir: Path) -> Path:
+    """Whichever of build.py/build_fpga.py exists in ``project_dir``.
+
+    ``build.py`` wins if both are present. Returns the ``build.py`` path
+    (even if absent) when neither exists, so the caller's "not found" error
+    names it.
+    """
+    for name in _DEFAULT_BUILD_SCRIPT_NAMES:
+        candidate = project_dir / name
+        if candidate.is_file():
+            return candidate
+    return project_dir / _DEFAULT_BUILD_SCRIPT_NAMES[0]
+
+
 def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
     """Build a :class:`ProjectConfig` from ``env`` (default: ``os.environ``).
 
     ``TSFPGA_MCP_PROJECT_DIR`` defaults to the current working directory,
-    and ``TSFPGA_MCP_BUILD_SCRIPT`` to ``build.py`` in it — set either
-    explicitly when the server isn't launched from the project directory,
-    or the build script has a different name/location.
+    and ``TSFPGA_MCP_BUILD_SCRIPT`` to whichever of ``build.py``/
+    ``build_fpga.py`` exists in it (``build.py`` wins if both do) — set
+    either explicitly when the server isn't launched from the project
+    directory, or the build script has a different name/location.
 
     Raises:
         ProjectConfigError: if ``TSFPGA_MCP_PROJECT_DIR`` is not a
@@ -132,16 +152,21 @@ def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
             f"TSFPGA_MCP_PROJECT_DIR is not a directory: {project_dir}"
         )
 
-    build_script = Path(source.get("TSFPGA_MCP_BUILD_SCRIPT", "build.py").strip())
-    if not build_script.is_absolute():
-        build_script = project_dir / build_script
-    build_script = build_script.resolve()
+    build_script_env = source.get("TSFPGA_MCP_BUILD_SCRIPT", "").strip()
+    if build_script_env:
+        build_script = Path(build_script_env)
+        if not build_script.is_absolute():
+            build_script = project_dir / build_script
+        build_script = build_script.resolve()
+    else:
+        build_script = _default_build_script(project_dir).resolve()
+
     if not build_script.is_file():
         raise ProjectConfigError(
             f"Build script not found: {build_script}. Set TSFPGA_MCP_PROJECT_DIR "
             "to the project directory and/or TSFPGA_MCP_BUILD_SCRIPT to the "
-            "build script's name/path if it isn't build.py in the current "
-            "working directory."
+            "build script's name/path if it isn't build.py or build_fpga.py "
+            "in the current working directory."
         )
 
     python = source.get("TSFPGA_MCP_PROJECT_PYTHON", "").strip() or _resolve_python(

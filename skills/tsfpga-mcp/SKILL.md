@@ -32,7 +32,7 @@ them up:
 | | `tsfpga_synthesize` (ad hoc) | `tsfpga_project_*` (project) |
 | --- | --- | --- |
 | Input | Loose source files passed in the call | A real project directory with its own build script |
-| Setup | None — works out of the box | None either — defaults to `build.py` in the server's current working directory; point `TSFPGA_MCP_PROJECT_DIR`/`TSFPGA_MCP_BUILD_SCRIPT` elsewhere if that's not where/what the project's build script is |
+| Setup | None — works out of the box | None either — defaults to whichever of `build.py`/`build_fpga.py` exists in the server's current working directory; point `TSFPGA_MCP_PROJECT_DIR`/`TSFPGA_MCP_BUILD_SCRIPT` elsewhere if that's not where/what the project's build script is |
 | Modules/generics/IP | Only what's in `sources` | Resolved exactly as the project's own build does (its `ModuleList`, register generation, IP, static generics, ...) |
 | Runs | In-process (one throwaway tsfpga module) | Subprocess: `<python> build.py <args>` in the project, same as a human would run it from a terminal |
 | Use for | "Does this entity/module synthesize / how many LUTs" for arbitrary/pasted/scratch code, quick what-if checks | "Build/check the netlist projects of *this* project", CI-like resource checks that must match the project's real build |
@@ -40,8 +40,9 @@ them up:
 If the user names or clearly means an existing project on disk (a repo
 with its own build script, module structure, register generation, etc.),
 use the `tsfpga_project_*` tools — call `tsfpga_project_status` first to
-confirm what it resolved to (it defaults to `build.py` in the current
-working directory, which is not necessarily the project the user means).
+confirm what it resolved to (it defaults to whichever of `build.py`/
+`build_fpga.py` exists in the current working directory, which is not
+necessarily the project the user means).
 If they hand you loose source files or ask a generic "would this
 synthesize" question with no project context, use `tsfpga_synthesize`
 instead. If `tsfpga_project_status` shows the wrong project/script and
@@ -77,7 +78,7 @@ the wrong thing.
 | `tsfpga_inspect` | Static scan of the given sources: VHDL entities with architectures + generics (name, type, default), Verilog modules with parameters (name, default), plus a `Notes:` list of ambiguities and per-file read errors. Nothing is compiled. | free |
 | `tsfpga_targets` | Chip targets this server can synthesize for: per chip — the yosys flow (`synth`, `synth_xilinx`, `synth_intel`, `synth_microchip`), whether that flow exists in the installed yosys, and the known device families. Use before asking the user which chip/family to target. | free |
 | `tsfpga_synthesize` | Runs the synthesis and returns the resource counts or `Synthesis FAILED` with diagnostics. | one GHDL + yosys run |
-| `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call first to confirm what it resolved to (defaults to `build.py` in the current working directory). | free |
+| `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call first to confirm what it resolved to (defaults to whichever of `build.py`/`build_fpga.py` exists in the current working directory). | free |
 | `tsfpga_project_list_builds` | Lists the project's own build projects (`build.py --list-only`), netlist builds by default. Use to find project name filters. | one subprocess call |
 | `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). | one full build subprocess |
 
@@ -113,11 +114,12 @@ the wrong thing.
 - `tsfpga_project_list_builds`: `netlist_builds` (default `true`), `project_filters` (wildcards, e.g. `["*canny*"]`, empty = all).
 - `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds`, `num_threads_per_build`, `timeout` (override for this call).
 
-All three default to `build.py` in the server's current working
-directory, no env var required. Set `TSFPGA_MCP_PROJECT_DIR` (project's
-directory) and/or `TSFPGA_MCP_BUILD_SCRIPT` (script name/path, relative
-to `TSFPGA_MCP_PROJECT_DIR` unless absolute) when the project isn't the
-cwd or the script isn't named `build.py`; see `tsfpga_project_status` for
+All three default to whichever of `build.py`/`build_fpga.py` exists in
+the server's current working directory (`build.py` wins if both do), no
+env var required. Set `TSFPGA_MCP_PROJECT_DIR` (project's directory)
+and/or `TSFPGA_MCP_BUILD_SCRIPT` (script name/path, relative to
+`TSFPGA_MCP_PROJECT_DIR` unless absolute) when the project isn't the cwd
+or the script has a different name; see `tsfpga_project_status` for
 what else is configurable (`TSFPGA_MCP_PROJECT_PYTHON`,
 `TSFPGA_MCP_PROJECTS_PATH`, `TSFPGA_MCP_PROJECT_TIMEOUT`,
 `TSFPGA_MCP_PROJECT_EXTRA_ARGS`).
@@ -188,9 +190,10 @@ only, no port-level netlist dump). Say so if asked; suggest
 `tsfpga_inspect` for the source-level port/generic declarations instead.
 
 **"Build/check the netlist projects of this project" (real project on disk)**
-1. Call `tsfpga_project_status` first — it defaults to `build.py` in the
-   current working directory, which may not be the project the user
-   means. If it resolved to the wrong project/script, fix it via
+1. Call `tsfpga_project_status` first — it defaults to whichever of
+   `build.py`/`build_fpga.py` exists in the current working directory,
+   which may not be the project the user means. If it resolved to the
+   wrong project/script, fix it via
    `TSFPGA_MCP_PROJECT_DIR`/`TSFPGA_MCP_BUILD_SCRIPT` (ask the user)
    before proceeding.
 2. `tsfpga_project_list_builds()` — see what project names exist before
