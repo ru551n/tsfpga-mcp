@@ -1,6 +1,6 @@
 ---
 name: tsfpga-mcp
-description: Synthesize VHDL/Verilog designs and check resource usage (LUTs/FFs/DSPs/block RAMs) through the tsfpga-mcp MCP server (tsfpga_status, tsfpga_inspect, tsfpga_targets, tsfpga_synthesize), or build/list a real project's own netlist builds through its build_fpga.py (tsfpga_project_status, tsfpga_project_list_builds, tsfpga_project_build). Use when the user asks to synthesize an entity or module, check resource counts, or find out which chips/families (generic/xilinx/intel/microchip) the installed yosys can target, and also when the user wants to build/list the netlist (or top-level) projects of an actual tsfpga project on disk; the server drives tsfpga's Yosys+GHDL netlist build and returns aggregated resource counts, and never guesses top, chip, f...
+description: Synthesize VHDL/Verilog designs and check resource usage (LUTs/FFs/DSPs/block RAMs) through the tsfpga-mcp MCP server (tsfpga_status, tsfpga_inspect, tsfpga_targets, tsfpga_synthesize), or build/list a real project's own netlist or top-level (Vivado synthesis + full implementation) builds through its build_fpga.py (tsfpga_project_status, tsfpga_project_list_builds, tsfpga_project_build, tsfpga_project_get_timing_report). Use when the user asks to synthesize an entity or module, check resource counts, or find out which chips/families (generic/xilinx/intel/microchip) the installed yosys can target, and also when the user wants to build/list the netlist (or top-level Vivado synthesis/implementation) projects of an actual tsfpga project on disk, or get a Vivado timing report for one; the server drives tsfpga's Yosys+GHDL netlist build and returns aggregated resource counts, and never guesses top, chip, f...
 ---
 
 # tsfpga MCP
@@ -112,9 +112,10 @@ the wrong thing.
 ## `tsfpga_project_*` inputs
 - `tsfpga_project_status` — no inputs.
 - `tsfpga_project_list_builds`: `netlist_builds` (default `true`), `project_filters` (wildcards, e.g. `["*canny*"]`, empty = all).
-- `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds` (projects built concurrently, tsfpga default `8` — the only parallelism knob netlist builds have, so it only helps when the filters match several projects), `num_threads_per_build` (threads inside one build process, tsfpga default `4`; top-level/Vivado builds only — Yosys netlist synthesis is single-threaded and ignores it, and the tool says so if you set it anyway), `timeout` (override for this call).
+- `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds` (projects built concurrently, tsfpga default `8` — the only parallelism knob netlist builds have, so it only helps when the filters match several projects), `num_threads_per_build` (threads inside one build process, tsfpga default `4`; top-level/Vivado builds only — Yosys netlist synthesis is single-threaded and ignores it, and the tool says so if you set it anyway), `synth_only` (top-level/Vivado builds only: stop after synthesis, no place & route/bitstream — a no-op for netlist builds, which are always synthesis-only already), `from_impl` (resume a prior `synth_only=true` top-level build into a full implementation run instead of starting over; mutually exclusive with `synth_only`, requires `use_existing_project=true`), `timeout` (override for this call).
+- `tsfpga_project_get_timing_report`: `project` (exact build name, required — not a wildcard), `run_index` (default `1`, matches the `N` in `synth_N`/`impl_N`), `synth_only` (report on the `synth_N` run instead of `impl_N` — use for netlist builds and for top-level builds that were themselves built with `synth_only=true`), `force_regenerate` (default `false`; re-run Vivado even if a cached `timing_summary.rpt` exists), `timeout` (override for this call).
 
-All three default to whichever of `build.py`/`build_fpga.py` exists in
+All default to whichever of `build.py`/`build_fpga.py` exists in
 the server's current working directory (`build.py` wins if both do), no
 env var required. Set `TSFPGA_MCP_PROJECT_DIR` (project's directory)
 and/or `TSFPGA_MCP_BUILD_SCRIPT` (script name/path, relative to
@@ -122,7 +123,21 @@ and/or `TSFPGA_MCP_BUILD_SCRIPT` (script name/path, relative to
 or the script has a different name; see `tsfpga_project_status` for
 what else is configurable (`TSFPGA_MCP_PROJECT_PYTHON`,
 `TSFPGA_MCP_PROJECTS_PATH`, `TSFPGA_MCP_PROJECT_TIMEOUT`,
-`TSFPGA_MCP_PROJECT_EXTRA_ARGS`).
+`TSFPGA_MCP_PROJECT_EXTRA_ARGS`, `TSFPGA_MCP_VIVADO`).
+
+### Timing reports (top-level/Vivado builds only)
+tsfpga only writes `timing_summary.rpt` automatically when it detects a
+timing violation (setup/hold slack < 0, or an unsafe clock crossing) — a
+normal, timing-clean implementation build produces **no report at all**.
+`tsfpga_project_get_timing_report` covers that common case too: absent a
+cached report (or with `force_regenerate=true`), it runs Vivado itself in
+batch mode (`open_project`/`open_run`/`report_timing_summary`) against the
+already-built project and returns the result. This needs the project
+already built via `tsfpga_project_build` (`netlist_builds=false` and
+`synth_only=false` for an `impl_N` run) plus a `vivado` executable on
+`PATH` or `TSFPGA_MCP_VIVADO` set — check `tsfpga_project_status` if
+that's unclear. It is the only tool in this server that invokes Vivado
+directly (the build tools never do — tsfpga does that internally).
 
 ## Output shape
 

@@ -107,6 +107,7 @@ files. See `tsfpga_project_status` to check what a given setup resolves to.
 | `TSFPGA_MCP_PROJECTS_PATH` | `--projects-path` passed to the build script | `<project dir>/tsfpga_mcp_out/projects` |
 | `TSFPGA_MCP_PROJECT_TIMEOUT` | max seconds for one build script invocation | `600` |
 | `TSFPGA_MCP_PROJECT_EXTRA_ARGS` | extra arguments appended, verbatim (shell-split), to every build script invocation | unset |
+| `TSFPGA_MCP_VIVADO` | `vivado` executable, used only by `tsfpga_project_get_timing_report` to regenerate a timing summary | `vivado` on PATH |
 
 ## Tools
 
@@ -116,9 +117,10 @@ files. See `tsfpga_project_status` to check what a given setup resolves to.
 | `tsfpga_inspect` | Static scan of the sources: VHDL entities with architectures and generics (name/type/default), Verilog modules with parameters, plus ambiguities. Nothing is compiled. |
 | `tsfpga_targets` | The chip targets this server can synthesize for: per chip, the yosys flow, whether it exists in the installed yosys, and the known device families. |
 | `tsfpga_status` | Server config: yosys version, available flows, plugin path, `GHDL_PREFIX`, timeout. Call it first when things look misconfigured. |
-| `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call it first to confirm what it resolved to. |
+| `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout, resolved `vivado` executable. Call it first to confirm what it resolved to. |
 | `tsfpga_project_list_builds` | Lists the project's own build projects (`build.py --list-only`), netlist builds by default. Use to find project name filters. |
-| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). `num_parallel_builds` builds several matched projects concurrently — the only parallelism netlist builds have, since `num_threads_per_build` (threads within one build) is used by top-level Vivado builds only. |
+| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). `num_parallel_builds` builds several matched projects concurrently — the only parallelism netlist builds have, since `num_threads_per_build` (threads within one build) is used by top-level Vivado builds only. For top-level (Vivado) builds, `synth_only` stops after synthesis and `from_impl` resumes a `synth_only` build into a full implementation (place & route + bitstream). |
+| `tsfpga_project_get_timing_report` | Gets the Vivado timing summary for an already-built project's run (`synth_N`/`impl_N`). tsfpga only writes `timing_summary.rpt` automatically on a timing violation, so for a normal clean build this tool runs Vivado in batch mode (`open_project`/`open_run`/`report_timing_summary`) to generate one on demand — needs `vivado` on PATH or `TSFPGA_MCP_VIVADO` set. `force_regenerate` re-runs Vivado even if a cached report exists. |
 
 ### Example
 

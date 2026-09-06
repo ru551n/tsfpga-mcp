@@ -100,6 +100,50 @@ def test_thread_counts_are_documented(field):
     assert "netlist" in description.lower()
 
 
+async def test_synth_only_passed_through(calls):
+    result = await server.tsfpga_project_build(
+        server.BuildInput(netlist_builds=False, synth_only=True)
+    )
+
+    assert "--synth-only" in calls[0]
+    assert "is ignored by netlist" not in result
+    assert "only apply to top-level" not in result
+
+
+async def test_from_impl_passed_through(calls):
+    await server.tsfpga_project_build(
+        server.BuildInput(netlist_builds=False, from_impl=True)
+    )
+
+    assert "--from-impl" in calls[0]
+
+
+async def test_synth_only_and_from_impl_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        server.BuildInput(synth_only=True, from_impl=True)
+
+
+async def test_from_impl_requires_use_existing_project():
+    with pytest.raises(ValueError, match="use_existing_project"):
+        server.BuildInput(from_impl=True, use_existing_project=False)
+
+
+async def test_vivado_flags_warn_for_netlist_builds(calls):
+    result = await server.tsfpga_project_build(server.BuildInput(synth_only=True))
+
+    assert "'synth_only' only apply to top-level" in result
+    # Still forwarded verbatim, the note only explains what it does.
+    assert "--synth-only" in calls[0]
+
+
+async def test_vivado_flags_warning_lists_both(calls):
+    monkeypatch_input = server.BuildInput(
+        netlist_builds=True, from_impl=True, use_existing_project=True
+    )
+    result = await server.tsfpga_project_build(monkeypatch_input)
+    assert "'from_impl' only apply to top-level" in result
+
+
 def test_project_config_unused_path_is_a_path(tmp_path: Path):
     # Guards the fixture above against ProjectConfig field drift.
     assert isinstance(
