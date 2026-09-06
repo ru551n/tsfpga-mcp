@@ -428,12 +428,51 @@ class BuildInput(BaseModel):
             "force a clean re-create."
         ),
     )
-    num_parallel_builds: int | None = Field(default=None, ge=1)
-    num_threads_per_build: int | None = Field(default=None, ge=1)
+    num_parallel_builds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "How many build projects to run at the same time, each in its "
+            "own process (tsfpga's own default: 8). This is the knob that "
+            "matters for netlist (Yosys) builds: parallelism comes from "
+            "building several projects at once, so it only speeds anything "
+            "up when 'project_filters' matches more than one project. Also "
+            "used when creating the projects."
+        ),
+    )
+    num_threads_per_build: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Threads used *inside* one build process (tsfpga's own "
+            "default: 4). Only top-level (Vivado) builds use this. Yosys "
+            "netlist synthesis is single-threaded, so with "
+            "netlist_builds=true (the default) this has no effect - raise "
+            "'num_parallel_builds' instead."
+        ),
+    )
     timeout: float | None = Field(
         default=None,
         gt=0,
         description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this build only.",
+    )
+
+
+def _parallelism_note(input: BuildInput) -> str:
+    """Warn when a thread count was set that the build flow cannot use.
+
+    tsfpga passes ``num_threads_per_build`` on as ``num_threads`` to each
+    project's ``build()``; only ``VivadoProject`` acts on it, while
+    ``YosysNetlistBuild`` silently ignores it (yosys synthesis is
+    single-threaded). Setting it for a netlist build therefore looks like
+    it worked but changes nothing, so say so instead.
+    """
+    if input.num_threads_per_build is None or not input.netlist_builds:
+        return ""
+    return (
+        "Note: 'num_threads_per_build' is ignored by netlist (Yosys) builds "
+        "- yosys synthesis is single-threaded. Use 'num_parallel_builds' to "
+        "build several projects concurrently instead.\n"
     )
 
 
@@ -450,7 +489,12 @@ async def tsfpga_project_build(input: BuildInput) -> str:
     project's regular builds do. Use tsfpga_project_list_builds first to
     find project name filters. Resource counts are written to
     '<name>_utilization.txt' under the project's output path and are also
-    echoed in this build's output."""
+    echoed in this build's output.
+
+    Parallelism: 'num_parallel_builds' runs several matched projects
+    concurrently (one process each) and is the only knob that speeds up
+    netlist builds; 'num_threads_per_build' applies within a single build
+    process and is used by top-level (Vivado) builds only."""
     try:
         config = _get_project_config()
         args = ["--projects-path", str(config.projects_path), "--no-color"]
@@ -475,7 +519,7 @@ async def tsfpga_project_build(input: BuildInput) -> str:
         if result.ok
         else f"Build failed (exit {result.returncode}).\n"
     )
-    return header + result.summary()
+    return header + _parallelism_note(input) + result.summary()
 
 
 def main() -> None:

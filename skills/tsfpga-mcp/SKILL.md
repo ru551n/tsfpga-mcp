@@ -112,7 +112,7 @@ the wrong thing.
 ## `tsfpga_project_*` inputs
 - `tsfpga_project_status` — no inputs.
 - `tsfpga_project_list_builds`: `netlist_builds` (default `true`), `project_filters` (wildcards, e.g. `["*canny*"]`, empty = all).
-- `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds`, `num_threads_per_build`, `timeout` (override for this call).
+- `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds` (projects built concurrently, tsfpga default `8` — the only parallelism knob netlist builds have, so it only helps when the filters match several projects), `num_threads_per_build` (threads inside one build process, tsfpga default `4`; top-level/Vivado builds only — Yosys netlist synthesis is single-threaded and ignores it, and the tool says so if you set it anyway), `timeout` (override for this call).
 
 All three default to whichever of `build.py`/`build_fpga.py` exists in
 the server's current working directory (`build.py` wins if both do), no

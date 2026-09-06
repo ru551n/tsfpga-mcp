@@ -94,6 +94,25 @@ async def test_build_succeeds_and_reports_resources(e2e, monkeypatch, tmp_path):
     assert "$_DFF_P_" in result
 
 
+async def test_build_with_parallelism_arguments(e2e, monkeypatch, tmp_path):
+    """The real build script must accept both thread-count arguments."""
+    await _reset_project_config(monkeypatch)
+    await _inject_project_env(monkeypatch, e2e)
+    monkeypatch.setenv("TSFPGA_MCP_PROJECTS_PATH", str(tmp_path / "projects"))
+
+    result = await server.tsfpga_project_build(
+        server.BuildInput(
+            project_filters=["counter"],
+            num_parallel_builds=2,
+            num_threads_per_build=2,
+        )
+    )
+
+    assert result.startswith("Build succeeded"), result
+    assert "'num_threads_per_build' is ignored by netlist" in result
+    assert "$_DFF_P_" in result
+
+
 async def test_build_no_matching_projects_still_succeeds(e2e, monkeypatch, tmp_path):
     await _reset_project_config(monkeypatch)
     await _inject_project_env(monkeypatch, e2e)
