@@ -118,7 +118,7 @@ files. See `tsfpga_project_status` to check what a given setup resolves to.
 | `tsfpga_status` | Server config: yosys version, available flows, plugin path, `GHDL_PREFIX`, timeout. Call it first when things look misconfigured. |
 | `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call it first to confirm what it resolved to. |
 | `tsfpga_project_list_builds` | Lists the project's own build projects (`build.py --list-only`), netlist builds by default. Use to find project name filters. |
-| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). |
+| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). `num_parallel_builds` builds several matched projects concurrently — the only parallelism netlist builds have, since `num_threads_per_build` (threads within one build) is used by top-level Vivado builds only. |
 
 ### Example
 
