@@ -31,6 +31,12 @@ drives a project's own ``run.py`` rather than importing VUnit directly.
 ``TSFPGA_MCP_PROJECT_EXTRA_ARGS``extra arguments appended, verbatim
                                   (shell-split), to every build script
                                   invocation.
+``TSFPGA_MCP_VIVADO``            ``vivado`` executable used only by
+                                  ``tsfpga_project_get_timing_report`` to
+                                  regenerate a timing summary for an
+                                  already-built project (default:
+                                  ``vivado`` on PATH; left ``None`` if not
+                                  found — the build tools never need it).
 ===============================  ===========================================
 """
 
@@ -57,6 +63,7 @@ class ProjectConfig:
     projects_path: Path
     timeout: float
     extra_args: list[str] = field(default_factory=list)
+    vivado: str | None = None
 
 
 def _venv_bin_dir_name() -> str:
@@ -201,6 +208,8 @@ def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
     extra_args_env = source.get("TSFPGA_MCP_PROJECT_EXTRA_ARGS", "")
     extra_args = shlex.split(extra_args_env) if extra_args_env else []
 
+    vivado = source.get("TSFPGA_MCP_VIVADO", "").strip() or shutil.which("vivado")
+
     return ProjectConfig(
         project_dir=project_dir,
         build_script=build_script,
@@ -208,4 +217,5 @@ def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
         projects_path=projects_path,
         timeout=timeout,
         extra_args=extra_args,
+        vivado=vivado,
     )

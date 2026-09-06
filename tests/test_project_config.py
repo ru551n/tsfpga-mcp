@@ -116,6 +116,26 @@ def test_non_positive_timeout(monkeypatch, project):
         load_project_config()
 
 
+def test_vivado_env_override(monkeypatch, project, tmp_path):
+    fake = tmp_path / "vivado"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.setenv("TSFPGA_MCP_VIVADO", str(fake))
+    cfg = load_project_config()
+    assert cfg.vivado == str(fake)
+
+
+def test_vivado_defaults_to_path_lookup(monkeypatch, project):
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.delenv("TSFPGA_MCP_VIVADO", raising=False)
+    cfg = load_project_config()
+    # Whatever shutil.which("vivado") finds (likely None in this sandbox);
+    # just check it's not left unset/crashing and matches PATH lookup.
+    import shutil
+
+    assert cfg.vivado == shutil.which("vivado")
+
+
 def test_python_prefers_project_venv(monkeypatch, project):
     venv_bin = project / ".venv" / "bin"
     venv_bin.mkdir(parents=True)

@@ -26,6 +26,8 @@ from .inspect import inspect_sources, render_inspection
 from .project_config import ProjectConfig, ProjectConfigError, load_project_config
 from .project_runner import RunTimeoutError, run_build_script
 from .synth import SynthError, build_failure, build_success, chip_spec, synthesize
+from .timing import TimingReportError, get_timing_report
+from .timing import run_name as timing_run_name
 
 mcp = MCPServer(
     "tsfpga_mcp",
@@ -39,12 +41,18 @@ mcp = MCPServer(
         "needed, and generic overrides. Ask the user when the top, chip, "
         "family or generic value cannot be inferred. tsfpga_synthesize "
         "stages arbitrary sources ad hoc, in-process, no project needed. "
-        "For a real project's own netlist builds (its modules, generics, "
-        "IP resolved exactly as its build does), use the tsfpga_project_* "
-        "tools instead, which run the project's own build script (default: "
+        "For a real project's own netlist OR top-level (Vivado synthesis + "
+        "full implementation) builds (its modules, generics, IP resolved "
+        "exactly as its build does), use the tsfpga_project_* tools "
+        "instead, which run the project's own build script (default: "
         "build.py/build_fpga.py in the current working directory, override "
         "with TSFPGA_MCP_PROJECT_DIR/TSFPGA_MCP_BUILD_SCRIPT) as a subprocess; "
-        "tsfpga_project_status reports what it resolved to."
+        "set netlist_builds=false on tsfpga_project_build for a top-level "
+        "Vivado build (synth_only for synthesis-only, from_impl to resume "
+        "into a full implementation run), then tsfpga_project_get_timing_report "
+        "for its Vivado timing summary (needs a 'vivado' executable, unlike "
+        "every other tool here). tsfpga_project_status reports what it "
+        "resolved to."
     ),
 )
 
@@ -349,6 +357,13 @@ async def tsfpga_project_status() -> str:
         f"- interpreter   : {config.python}",
         f"- projects path : {config.projects_path}",
         f"- timeout       : {config.timeout:.0f}s",
+        "- vivado        : "
+        + (
+            config.vivado
+            if config.vivado
+            else "not found (only needed by tsfpga_project_get_timing_report; "
+            "set TSFPGA_MCP_VIVADO or add 'vivado' to PATH)"
+        ),
     ]
     if config.extra_args:
         lines.append(f"- extra args    : {' '.join(config.extra_args)}")
@@ -451,11 +466,45 @@ class BuildInput(BaseModel):
             "'num_parallel_builds' instead."
         ),
     )
+    synth_only: bool = Field(
+        default=False,
+        description=(
+            "Stop after synthesis; do not run place & route or write a "
+            "bitstream. Only meaningful for top-level (Vivado) builds "
+            "(netlist_builds=false) — netlist builds are always "
+            "synthesis-only regardless of this flag."
+        ),
+    )
+    from_impl: bool = Field(
+        default=False,
+        description=(
+            "Run implementation (place & route, bitstream) and onward on "
+            "an already-synthesized top-level (Vivado) project, instead of "
+            "starting over from synthesis. Requires a prior "
+            "synth_only=true build of the same project plus "
+            "use_existing_project=true here. Mutually exclusive with "
+            "synth_only."
+        ),
+    )
     timeout: float | None = Field(
         default=None,
         gt=0,
         description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this build only.",
     )
+
+    @model_validator(mode="after")
+    def _check_synth_only_from_impl(self) -> BuildInput:
+        if self.synth_only and self.from_impl:
+            raise ValueError(
+                "'synth_only' and 'from_impl' are mutually exclusive: one "
+                "stops before implementation, the other resumes from it."
+            )
+        if self.from_impl and not self.use_existing_project:
+            raise ValueError(
+                "'from_impl' requires use_existing_project=true (it "
+                "resumes an existing, already-synthesized project)."
+            )
+        return self
 
 
 def _parallelism_note(input: BuildInput) -> str:
@@ -476,6 +525,34 @@ def _parallelism_note(input: BuildInput) -> str:
     )
 
 
+def _vivado_only_flags_note(input: BuildInput) -> str:
+    """Warn when Vivado-only build-stage flags are set for a netlist build.
+
+    Netlist builds (``YosysNetlistBuild``) are always synthesis-only
+    already — there is no place & route/bitstream step to skip
+    (``synth_only``) or resume from (``from_impl``) — so either flag is a
+    silent no-op there.
+    """
+    if not input.netlist_builds:
+        return ""
+    flags = [
+        name
+        for name, value in (
+            ("synth_only", input.synth_only),
+            ("from_impl", input.from_impl),
+        )
+        if value
+    ]
+    if not flags:
+        return ""
+    joined = " and ".join(f"'{flag}'" for flag in flags)
+    return (
+        f"Note: {joined} only apply to top-level (Vivado) builds "
+        "(netlist_builds=false) - netlist builds are always "
+        "synthesis-only already.\n"
+    )
+
+
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
 async def tsfpga_project_build(input: BuildInput) -> str:
     """Build project(s) by running the project's own build script (default:
@@ -489,7 +566,11 @@ async def tsfpga_project_build(input: BuildInput) -> str:
     project's regular builds do. Use tsfpga_project_list_builds first to
     find project name filters. Resource counts are written to
     '<name>_utilization.txt' under the project's output path and are also
-    echoed in this build's output.
+    echoed in this build's output. For top-level (Vivado) builds, use
+    'synth_only' to stop after synthesis or 'from_impl' to resume a
+    previously synth_only=true build into a full implementation
+    (place & route + bitstream) run; call tsfpga_project_get_timing_report
+    afterwards for the timing summary.
 
     Parallelism: 'num_parallel_builds' runs several matched projects
     concurrently (one process each) and is the only knob that speeds up
@@ -502,6 +583,10 @@ async def tsfpga_project_build(input: BuildInput) -> str:
             args.append("--netlist-builds")
         if input.use_existing_project:
             args.append("--use-existing-project")
+        if input.synth_only:
+            args.append("--synth-only")
+        if input.from_impl:
+            args.append("--from-impl")
         if input.num_parallel_builds is not None:
             args += ["--num-parallel-builds", str(input.num_parallel_builds)]
         if input.num_threads_per_build is not None:
@@ -519,7 +604,108 @@ async def tsfpga_project_build(input: BuildInput) -> str:
         if result.ok
         else f"Build failed (exit {result.returncode}).\n"
     )
-    return header + _parallelism_note(input) + result.summary()
+    return (
+        header
+        + _parallelism_note(input)
+        + _vivado_only_flags_note(input)
+        + result.summary()
+    )
+
+
+class TimingReportInput(BaseModel):
+    """Input for tsfpga_project_get_timing_report."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    project: str = Field(
+        min_length=1,
+        description=(
+            "Exact build project name (not a wildcard) — see "
+            "tsfpga_project_list_builds for the available names."
+        ),
+    )
+    run_index: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Vivado run index (the 'N' in synth_N/impl_N), matching "
+            "whatever 'run_index' the build used (tsfpga's own default "
+            "is 1, and tsfpga_project_build doesn't currently expose a way "
+            "to change it, so 1 is virtually always correct)."
+        ),
+    )
+    synth_only: bool = Field(
+        default=False,
+        description=(
+            "Report on the post-synthesis run (synth_N) instead of the "
+            "post-implementation run (impl_N, the default). Set this for "
+            "netlist builds, and for top-level builds that were "
+            "themselves run with synth_only=true — neither has an impl_N "
+            "run."
+        ),
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        description=(
+            "Always re-run Vivado to regenerate the report, even if a "
+            "timing_summary.rpt already exists on disk (written "
+            "automatically by tsfpga when a timing violation was "
+            "detected). Slower — spins up Vivado — but reflects the "
+            "current design instead of a possibly-stale cached file."
+        ),
+    )
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this call only.",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def tsfpga_project_get_timing_report(input: TimingReportInput) -> str:
+    """Get the Vivado timing summary for one already-built project's run.
+
+    tsfpga only writes 'timing_summary.rpt' automatically when it detects
+    a timing violation (setup/hold slack < 0, or an unsafe clock
+    crossing) — a normal, timing-clean implementation build produces no
+    report at all. This tool covers that common case too: if no cached
+    report exists (or force_regenerate=true), it runs Vivado in batch mode
+    against the already-built project ('open_project' the .xpr,
+    'open_run' the requested synth_N/impl_N run, 'report_timing_summary')
+    and returns the result. This is the only tool that invokes Vivado
+    directly (the build tools never do — tsfpga does that internally),
+    and it needs the project already built via tsfpga_project_build first
+    (netlist_builds=false and synth_only=false for an impl_N run) plus a
+    'vivado' executable on PATH or TSFPGA_MCP_VIVADO set — check
+    tsfpga_project_status if that's unclear. Marked as not read-only since
+    regenerating the report runs Vivado, which writes files into the
+    project directory."""
+    try:
+        config = _get_project_config()
+        result = await get_timing_report(
+            config,
+            project=input.project,
+            run_index=input.run_index,
+            synth_only=input.synth_only,
+            force_regenerate=input.force_regenerate,
+            timeout=input.timeout,
+        )
+    except ProjectConfigError as exc:
+        return _err(exc)
+    except (TimingReportError, RunTimeoutError) as exc:
+        return _err(exc)
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
+
+    run = timing_run_name(input.run_index, input.synth_only)
+    origin = (
+        "regenerated via Vivado" if result.regenerated else "cached from a previous run"
+    )
+    header = (
+        f"Timing report for {input.project!r} ({run}, {origin}), "
+        f"{result.report_file}:\n\n"
+    )
+    return header + result.report
 
 
 def main() -> None:
