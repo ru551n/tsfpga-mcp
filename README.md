@@ -142,9 +142,11 @@ Nothing serializes two servers against one checkout: build projects land in
 `TSFPGA_MCP_PROJECTS_PATH` (`<project>/tsfpga_mcp_out/projects` by default) and
 two agents building the same project name there clobber each other. Give each
 agent its own projects path, or — simpler and fully disjoint — its own **git
-worktree**, started with that worktree as cwd. Venv creation is safe either
-way: it takes a cross-process lock keyed on the project path, shared with
-vunit-mcp (which provisions the same venv).
+worktree**, started with that worktree as cwd. Venv provisioning is safe
+either way: discovery *and* creation happen under a cross-process lock keyed on
+the project path, shared with vunit-mcp (which provisions the same venv), so a
+server that arrives mid-install waits for the real thing instead of adopting a
+virtualenv that has an interpreter but not yet any packages.
 
 ## Tools
 
