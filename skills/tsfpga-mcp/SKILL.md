@@ -125,6 +125,23 @@ what else is configurable (`TSFPGA_MCP_PROJECT_PYTHON`,
 `TSFPGA_MCP_PROJECTS_PATH`, `TSFPGA_MCP_PROJECT_TIMEOUT`,
 `TSFPGA_MCP_PROJECT_EXTRA_ARGS`, `TSFPGA_MCP_VIVADO`).
 
+### Project virtualenv
+The project's own `.venv`/`venv` is always used **and activated** for the build
+script (and for Vivado in `tsfpga_project_get_timing_report`): `VIRTUAL_ENV`
+set, `<venv>/bin` first on `PATH`, `PYTHONHOME` cleared, this server's own venv
+removed. If the project has no venv, one is created with uv from
+`pyproject.toml` (`uv sync`) or `requirements.txt`, under a cross-process lock
+shared with vunit-mcp so two servers/agents starting at once cannot race.
+`tsfpga_project_status` reports the venv and what was done. Disable with
+`TSFPGA_MCP_PROJECT_AUTO_VENV=0`; setting `TSFPGA_MCP_PROJECT_PYTHON` also
+disables it.
+
+### Several agents on one code base
+Build projects are written to `TSFPGA_MCP_PROJECTS_PATH`
+(`<project>/tsfpga_mcp_out/projects` by default) — two agents building the same
+project name there will clobber each other. Give each agent its own path, or
+better, its own git worktree (then the cwd defaults are already disjoint).
+
 ### Timing reports (top-level/Vivado builds only)
 tsfpga only writes `timing_summary.rpt` automatically when it detects a
 timing violation (setup/hold slack < 0, or an unsafe clock crossing) — a

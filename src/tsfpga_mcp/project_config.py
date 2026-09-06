@@ -18,11 +18,20 @@ drives a project's own ``run.py`` rather than importing VUnit directly.
                                   ``build_fpga.py`` exists in the project
                                   dir; ``build.py`` wins if both do).
 ``TSFPGA_MCP_PROJECT_PYTHON``    interpreter used to run the build script
-                                  (default: resolved the same way vunit-mcp
-                                  resolves its target project's interpreter
-                                  — the project's own ``.venv``/``venv``
-                                  first, else PATH with this server's own
-                                  venv excluded, else ``sys.executable``).
+                                  (default: the project's own
+                                  ``.venv``/``venv`` — created with uv from
+                                  ``pyproject.toml``/``requirements.txt`` if
+                                  absent, see ``project_venv`` — else PATH
+                                  with this server's own venv excluded, else
+                                  ``sys.executable``). Setting it disables
+                                  venv auto-creation.
+``TSFPGA_MCP_PROJECT_AUTO_VENV`` create a missing project virtualenv with
+                                  uv (default: yes; ``0``/``false``/``no``/
+                                  ``off`` disables).
+``TSFPGA_MCP_UV``                ``uv`` executable used to create it
+                                  (default: ``uv`` on PATH).
+``TSFPGA_MCP_PROJECT_VENV_TIMEOUT`` max seconds for venv creation +
+                                  dependency install (default: 900).
 ``TSFPGA_MCP_PROJECTS_PATH``     ``--projects-path`` passed to the build
                                   script (default:
                                   ``<project dir>/tsfpga_mcp_out/projects``).
@@ -50,6 +59,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .project_venv import (
+    DEFAULT_VENV_TIMEOUT,
+    auto_venv_enabled,
+    ensure_venv,
+    owning_venv,
+    venv_bin_dir_name,
+)
+
 
 class ProjectConfigError(RuntimeError):
     """Raised when the project-mode server cannot be configured/validated."""
@@ -64,21 +81,18 @@ class ProjectConfig:
     timeout: float
     extra_args: list[str] = field(default_factory=list)
     vivado: str | None = None
-
-
-def _venv_bin_dir_name() -> str:
-    """The platform-specific scripts subdir name inside a virtualenv."""
-    return "Scripts" if os.name == "nt" else "bin"
+    venv: Path | None = None
+    venv_notes: tuple[str, ...] = ()
 
 
 def _own_venv_bin() -> str | None:
     """This server's own virtualenv 'bin'/'Scripts' dir, if running from one."""
     venv = os.environ.get("VIRTUAL_ENV")
-    return str(Path(venv) / _venv_bin_dir_name()) if venv else None
+    return str(Path(venv) / venv_bin_dir_name()) if venv else None
 
 
 def _resolve_python(project_dir: Path, env: Mapping[str, str]) -> str:
-    """Pick the interpreter that shall run the *target* project's build script.
+    """Fallback interpreter for a project that has (and cannot get) no venv.
 
     Same rationale and preference order as vunit-mcp's ``_resolve_python``:
     this server's own virtualenv has no reason to contain the target
@@ -91,8 +105,12 @@ def _resolve_python(project_dir: Path, env: Mapping[str, str]) -> str:
        find on PATH, explicitly excluding this server's own virtualenv's
        ``bin`` dir.
     3. ``sys.executable`` as a last resort.
+
+    Normally unused: a project venv is created if missing
+    (``_resolve_venv_and_python``) and its interpreter wins — this is the
+    degraded path (no uv installed, or nothing to install from).
     """
-    bin_dir_name = _venv_bin_dir_name()
+    bin_dir_name = venv_bin_dir_name()
     exe_names = (
         ("python.exe", "python3.exe") if os.name == "nt" else ("python3", "python")
     )
@@ -132,6 +150,49 @@ def _default_build_script(project_dir: Path) -> Path:
         if candidate.is_file():
             return candidate
     return project_dir / _DEFAULT_BUILD_SCRIPT_NAMES[0]
+
+
+def _venv_timeout(env: Mapping[str, str]) -> float:
+    raw = env.get("TSFPGA_MCP_PROJECT_VENV_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_VENV_TIMEOUT
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ProjectConfigError(
+            f"TSFPGA_MCP_PROJECT_VENV_TIMEOUT must be a number of seconds, got {raw!r}"
+        ) from exc
+    if timeout <= 0:
+        raise ProjectConfigError(
+            f"TSFPGA_MCP_PROJECT_VENV_TIMEOUT must be positive, got {timeout}"
+        )
+    return timeout
+
+
+def _resolve_venv_and_python(
+    project_dir: Path, env: Mapping[str, str]
+) -> tuple[Path | None, str, tuple[str, ...]]:
+    """The venv to activate, the interpreter to run, and any setup notes.
+
+    An explicit ``TSFPGA_MCP_PROJECT_PYTHON`` is authoritative and never
+    triggers provisioning — but if it points into a virtualenv, that venv is
+    still activated for the subprocess rather than merely executed.
+    """
+    explicit_python = env.get("TSFPGA_MCP_PROJECT_PYTHON", "").strip()
+    if explicit_python:
+        return owning_venv(explicit_python), explicit_python, ()
+
+    result = ensure_venv(
+        project_dir,
+        create=auto_venv_enabled(env, "TSFPGA_MCP_PROJECT_AUTO_VENV"),
+        uv=env.get("TSFPGA_MCP_UV", "").strip() or None,
+        timeout=_venv_timeout(env),
+        env=env,
+    )
+    interpreter = result.interpreter
+    if interpreter is None:
+        return None, _resolve_python(project_dir, env), result.notes
+    return result.venv, interpreter, result.notes
 
 
 def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
@@ -176,9 +237,7 @@ def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
             "in the current working directory."
         )
 
-    python = source.get("TSFPGA_MCP_PROJECT_PYTHON", "").strip() or _resolve_python(
-        project_dir, source
-    )
+    venv, python, venv_notes = _resolve_venv_and_python(project_dir, source)
 
     projects_path_env = source.get("TSFPGA_MCP_PROJECTS_PATH", "").strip()
     if projects_path_env:
@@ -218,4 +277,6 @@ def load_project_config(env: Mapping[str, str] | None = None) -> ProjectConfig:
         timeout=timeout,
         extra_args=extra_args,
         vivado=vivado,
+        venv=venv,
+        venv_notes=venv_notes,
     )

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .project_config import ProjectConfig
-from .project_runner import RunTimeoutError, _kill_process_group, strip_ansi
+from .project_runner import RunTimeoutError, _kill_process_group, run_env, strip_ansi
 
 REPORT_FILENAME = "timing_summary.rpt"
 _TCL_FILENAME = "tsfpga_mcp_report_timing_summary.tcl"
@@ -99,6 +99,9 @@ async def _run_vivado(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(cwd),
+        # Same activated environment as a build: this server's own venv
+        # must not leak into Vivado, the project's must be in front.
+        env=run_env(config),
         # Own process group so a timeout can kill Vivado's children too.
         start_new_session=True,
     )

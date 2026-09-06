@@ -350,10 +350,14 @@ async def tsfpga_project_status() -> str:
         config = _get_project_config()
     except ProjectConfigError as exc:
         return _err(exc)
+    venv_note = str(config.venv) if config.venv else "none (not activated)"
+    if config.venv_notes:
+        venv_note += " — " + "; ".join(config.venv_notes)
     lines = [
         "tsfpga-mcp project mode",
         f"- project dir   : {config.project_dir}",
         f"- build script  : {config.build_script}",
+        f"- virtualenv    : {venv_note}",
         f"- interpreter   : {config.python}",
         f"- projects path : {config.projects_path}",
         f"- timeout       : {config.timeout:.0f}s",

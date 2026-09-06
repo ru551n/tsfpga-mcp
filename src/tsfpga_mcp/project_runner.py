@@ -17,9 +17,9 @@ import os
 import re
 import signal
 from dataclasses import dataclass
-from pathlib import Path
 
-from .project_config import ProjectConfig, _venv_bin_dir_name
+from .project_config import ProjectConfig
+from .project_venv import activate
 
 # Matches ANSI escape sequences (CSI, OSC, and two-byte Fe/Fn) so captured
 # output stays plain text even though tsfpga's build flow colorizes its
@@ -96,22 +96,20 @@ def build_argv(config: ProjectConfig, args: list[str]) -> list[str]:
 def run_env(config: ProjectConfig) -> dict[str, str]:
     """Environment for the build script subprocess.
 
+    The project's virtualenv (``config.venv``, created on demand at config
+    load) is *activated*: ``VIRTUAL_ENV`` set and its ``bin`` dir put first
+    on PATH, so console scripts and any nested ``python``/``pip`` the build
+    script itself invokes resolve inside it — running ``config.python``
+    alone would not do that.
+
     This server may itself be running from its own virtualenv; that venv
-    describes *this* process, not the target project, so its
-    ``VIRTUAL_ENV``/``PYTHONHOME`` and its ``bin`` dir on PATH are stripped
-    here rather than handed to the subprocess (``config.python`` is
-    resolved separately — this only prevents the target's own subprocesses,
-    e.g. ghdl/yosys invocations made from the build script, from picking up
-    the wrong environment).
+    describes *this* process, not the target project, so it is deactivated
+    first: its ``VIRTUAL_ENV``/``PYTHONHOME`` and its ``bin`` dir on PATH
+    never reach the subprocess (nor the ghdl/yosys children the build
+    script spawns).
     """
     env = dict(os.environ)
-    own_venv = env.pop("VIRTUAL_ENV", None)
-    env.pop("PYTHONHOME", None)
-    if own_venv:
-        own_bin = str(Path(own_venv) / _venv_bin_dir_name())
-        env["PATH"] = os.pathsep.join(
-            entry for entry in env.get("PATH", "").split(os.pathsep) if entry != own_bin
-        )
+    activate(env, config.venv)
     return env
 
 
