@@ -153,6 +153,7 @@ virtualenv that has an interpreter but not yet any packages.
 | Tool | What it does |
 |---|---|
 | `tsfpga_synthesize` | Synthesizes the given top level for a chip/family with optional generic overrides, and returns the resource counts or the failure diagnostics. |
+| `tsfpga_hierarchy` | Elaborates the given top level with GHDL (generics resolved, generate blocks expanded) and returns its instance hierarchy tree — no `synth_*` technology mapping, so it's much faster than `tsfpga_synthesize` when only the module/instance structure is needed. The free/open equivalent of a commercial HDL compiler's "architectural exploration" hierarchy view. |
 | `tsfpga_inspect` | Static scan of the sources: VHDL entities with architectures and generics (name/type/default), Verilog modules with parameters, plus ambiguities. Nothing is compiled. |
 | `tsfpga_targets` | The chip targets this server can synthesize for: per chip, the yosys flow, whether it exists in the installed yosys, and the known device families. |
 | `tsfpga_status` | Server config: yosys version, available flows, plugin path, `GHDL_PREFIX`, timeout. Call it first when things look misconfigured. |

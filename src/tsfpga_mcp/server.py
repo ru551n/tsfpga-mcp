@@ -25,6 +25,7 @@ from .build_diagnostics import build_diagnostics
 from .capabilities import Capabilities, render_targets
 from .config import Config, ConfigError, load_config
 from .drc_report import DrcReportError, checks_found, get_drc_report
+from .hierarchy import hierarchy, hierarchy_failure, hierarchy_success
 from .inspect import inspect_sources, render_inspection
 from .project_config import ProjectConfig, ProjectConfigError, load_project_config
 from .project_runner import RunTimeoutError, run_build_script
@@ -45,6 +46,13 @@ mcp = MCPServer(
         "needed, and generic overrides. Ask the user when the top, chip, "
         "family or generic value cannot be inferred. tsfpga_synthesize "
         "stages arbitrary sources ad hoc, in-process, no project needed. "
+        "When only the module/instance hierarchy is needed (generics "
+        "resolved, generate blocks expanded) — not resource counts — use "
+        "tsfpga_hierarchy instead: it stops after GHDL elaboration, "
+        "skipping the expensive synth_* technology-mapping step entirely, "
+        "so it is much faster than tsfpga_synthesize. It is the free/open "
+        "equivalent of a commercial HDL compiler's 'architectural "
+        "exploration' hierarchy view. "
         "For a real project's own netlist OR top-level (Vivado synthesis + "
         "full implementation) builds (its modules, generics, IP resolved "
         "exactly as its build does), use the tsfpga_project_* tools "
@@ -269,6 +277,140 @@ async def tsfpga_synthesize(input: SynthesizeInput) -> str:
             elapsed=result.elapsed,
         )
     return build_failure(result.output, result.elapsed)
+
+
+class HierarchyInput(BaseModel):
+    """Input for tsfpga_hierarchy."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    sources: list[str] = Field(
+        default_factory=list,
+        description=(
+            "HDL source files (.vhd/.vhdl and/or .v/.sv) with no explicit "
+            "library: staged into the single library named after 'top'. "
+            "All units the top level needs must be covered by these files "
+            "plus 'libraries'. Base names must be unique within this list "
+            "(they may repeat across different 'libraries' entries)."
+        ),
+    )
+    libraries: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Explicit per-library source grouping: VHDL library name -> "
+            "its source files, for designs whose sources must be analyzed "
+            "into more than one VHDL library — e.g. a top level that uses "
+            "'library <name>; entity <name>.<entity>' to cross into a "
+            "sibling library, as produced by tsfpga's own per-module-folder "
+            "library convention (tsfpga.module.get_modules()). Each named "
+            "library's files are staged and GHDL-analyzed as that library. "
+            "Base names must be unique within each library, but may repeat "
+            "across different libraries (including the 'sources' library). "
+            "Combine with 'sources' for files that belong in the (single) "
+            "library named after 'top'."
+        ),
+    )
+    top: str = Field(
+        description=(
+            "Top level name: the VHDL entity or Verilog/SystemVerilog "
+            "module whose hierarchy is elaborated (no library prefix)."
+        ),
+        min_length=1,
+    )
+    vhdl_entities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Only used when 'top' is NOT a VHDL entity (i.e. it is a "
+            "Verilog/SystemVerilog module, or the design has no VHDL at "
+            "all): the names of the VHDL entities that shall be made "
+            "available for instantiation from the non-VHDL top. Leave "
+            "empty when 'top' is a VHDL entity — its VHDL dependencies "
+            "are found automatically."
+        ),
+    )
+    generics: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "VHDL generic overrides, name -> value, e.g. {'WIDTH': '8'}. "
+            "Only supported when 'top' is a VHDL entity; the declared "
+            "VHDL type (from tsfpga_inspect) decides how the value is "
+            "interpreted (boolean/integer/real/vector/string). Resolved "
+            "generics are what makes the returned hierarchy concrete: "
+            "each distinct generic specialization elaborates to its own "
+            "module, and any generate blocks are expanded accordingly."
+        ),
+    )
+    vhdl_standard: Literal["93", "08", "19"] = Field(
+        default="08",
+        description="VHDL standard for the GHDL frontend.",
+    )
+    timeout: float | None = Field(
+        default=None,
+        ge=1,
+        le=3600,
+        description="Max seconds for this run (default: TSFPGA_MCP_TIMEOUT).",
+    )
+
+    @model_validator(mode="after")
+    def _check_has_sources(self) -> HierarchyInput:
+        if not self.sources and not any(self.libraries.values()):
+            raise ValueError(
+                "Provide at least one source file via 'sources' and/or 'libraries'."
+            )
+        return self
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def tsfpga_hierarchy(input: HierarchyInput) -> str:
+    """Elaborate a VHDL or Verilog design with GHDL and return its
+    generics-resolved instance hierarchy tree — without running any
+    synth_* technology-mapping pass, so it is much faster than
+    tsfpga_synthesize when only the module/instance structure is needed.
+
+    Stages 'sources' (library named after 'top') and each 'libraries'
+    entry exactly like tsfpga_synthesize, runs the same cheap GHDL
+    analysis + elaboration (generics baked in, generate blocks expanded
+    into concrete instances), then stops: no chip/family/technology
+    target is involved, since there is no real device to map onto. The
+    result lists each elaborated module together with the instances
+    (submodules) it directly contains, i.e. the free/open equivalent of
+    a commercial HDL compiler's 'architectural exploration' hierarchy
+    view. On failure returns the captured diagnostics, same as
+    tsfpga_synthesize.
+
+    Use tsfpga_inspect first to discover top levels and generics; use
+    tsfpga_synthesize instead when resource counts (LUTs, FFs, DSPs,
+    block RAMs) for a specific chip/family are actually needed."""
+    try:
+        config = _get_config()
+        timeout = input.timeout if input.timeout is not None else config.timeout
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                hierarchy,
+                config=config,
+                sources=input.sources,
+                libraries=input.libraries,
+                top=input.top,
+                vhdl_entities=input.vhdl_entities,
+                generics=input.generics,
+                vhdl_standard=input.vhdl_standard,
+            ),
+            timeout=timeout,
+        )
+    except ConfigError as exc:
+        return _err(exc)
+    except SynthError as exc:
+        return f"Error: {exc}"
+    except TimeoutError:
+        return f"Error: hierarchy elaboration exceeded the {timeout:.0f}s timeout."
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
+
+    if result.success:
+        return hierarchy_success(
+            top=input.top, elapsed=result.elapsed, tree=result.output
+        )
+    return hierarchy_failure(result.output, result.elapsed)
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
