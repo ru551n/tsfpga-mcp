@@ -300,6 +300,42 @@ def test_parse_timing_summary_unparseable_text_is_graceful():
     assert summary.values == {}
     assert summary.failing_endpoints == []
     assert "could not determine" in summary.render()
+    # Convenience properties stay well-defined on unparseable input too.
+    assert summary.failing_endpoint_count is None
+    assert summary.has_violations is False
+
+
+def test_timing_summary_violation_convenience_fields():
+    summary = parse_timing_summary(_REAL_TIMING_SUMMARY_EXCERPT)
+    # TNS=12, THS=0, TPWS=0 Failing Endpoints in the fixture.
+    assert summary.failing_endpoint_count == 12
+    assert summary.has_violations is True
+
+
+_CLEAN_TIMING_SUMMARY_EXCERPT = """\
+---------------------------------------------------------
+| Design Timing Summary
+| ----------------------
+---------------------------------------------------------
+
+  WNS(ns)  TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints  WHS(ns)  \
+THS(ns)  THS Failing Endpoints  THS Total Endpoints  WPWS(ns)  TPWS(ns)  \
+TPWS Failing Endpoints  TPWS Total Endpoints
+  -------  -------  ----------------------  --------------------  \
+-------  -------  ----------------------  --------------------  --------  \
+--------  ----------------------  --------------------
+    1.234    0.000  0  144  0.045  0.000  0  120  2.000  0.000  0  116
+
+
+Timing constraints are met.
+"""
+
+
+def test_timing_summary_no_violations_when_clean():
+    summary = parse_timing_summary(_CLEAN_TIMING_SUMMARY_EXCERPT)
+    assert summary.constraints_met is True
+    assert summary.failing_endpoint_count == 0
+    assert summary.has_violations is False
 
 
 def test_build_tcl_report_type_pulse_width(tmp_path: Path):

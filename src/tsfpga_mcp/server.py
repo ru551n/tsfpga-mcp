@@ -32,7 +32,11 @@ from .project_runner import RunTimeoutError, run_build_script
 from .synth import SynthError, build_failure, build_success, chip_spec, synthesize
 from .timing import TimingReportError, get_timing_report, parse_timing_summary
 from .timing import run_name as timing_run_name
-from .utilization_report import UtilizationReportError, get_utilization_report
+from .utilization_report import (
+    UtilizationReportError,
+    get_utilization_report,
+    parse_utilization_summary,
+)
 
 mcp = MCPServer(
     "tsfpga_mcp",
@@ -945,6 +949,16 @@ class UtilizationReportInput(BaseModel):
         ge=1,
         description="How many levels of module hierarchy to break down.",
     )
+    verbosity: Literal["full", "summary"] = Field(
+        default="full",
+        description=(
+            "'full' (default) returns a structured top-level LUT/register/"
+            "BRAM/DSP summary (parsed from the report) followed by the full "
+            "raw report text. 'summary' returns just the structured "
+            "summary — much shorter, use when you only need the top-level "
+            "resource counts, not the per-instance hierarchy breakdown."
+        ),
+    )
     force_regenerate: bool = Field(
         default=False,
         description=(
@@ -965,10 +979,14 @@ class UtilizationReportInput(BaseModel):
 async def tsfpga_project_get_utilization_report(input: UtilizationReportInput) -> str:
     """Get a hierarchical Vivado utilization report for one already-built
     project's run (per-module LUT/FF/BRAM/DSP/... breakdown, 'hierarchical_
-    depth' levels deep). tsfpga itself already writes this at depth 4 for
-    every build (it's how tsfpga computes the top-level size it prints), so
-    the default 'hierarchical_depth=4' is normally served straight from
-    that existing file with no Vivado call at all. Any other depth (or
+    depth' levels deep). The result is prefixed with a structured top-level
+    LUT/register/BRAM/DSP summary parsed from the report's "Utilization by
+    Hierarchy" table (column names vary by Vivado version/device family;
+    unrecognized columns are still available in the raw report). tsfpga
+    itself already writes this at depth 4 for every build (it's how tsfpga
+    computes the top-level size it prints), so the default
+    'hierarchical_depth=4' is normally served straight from that existing
+    file with no Vivado call at all. Any other depth (or
     force_regenerate=True) runs Vivado in batch mode against the already-
     built project ('open_project' the .xpr, 'open_run' the requested
     synth_N/impl_N run, 'report_utilization -hierarchical') to produce its
@@ -1002,7 +1020,10 @@ async def tsfpga_project_get_utilization_report(input: UtilizationReportInput) -
         f"Hierarchical utilization report for {input.project!r} ({run}, "
         f"{origin}), {result.report_file}:\n\n"
     )
-    return header + result.report
+    structured = parse_utilization_summary(result.report).render()
+    if input.verbosity == "summary":
+        return header + structured
+    return header + structured + "\n\nFull report:\n\n" + result.report
 
 
 class DrcReportInput(BaseModel):

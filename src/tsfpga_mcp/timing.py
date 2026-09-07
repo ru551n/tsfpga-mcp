@@ -176,11 +176,52 @@ _VIOLATED_ENDPOINT_RE = re.compile(
 )
 
 
+# The three raw "... Failing Endpoints" counts report_timing_summary
+# prints (setup, hold, pulse-width) — kept in TimingSummary.values as
+# strings since that dict mirrors the report's own column names verbatim.
+_FAILING_ENDPOINT_KEYS = (
+    "TNS Failing Endpoints",
+    "THS Failing Endpoints",
+    "TPWS Failing Endpoints",
+)
+
+
 @dataclass(frozen=True)
 class TimingSummary:
     constraints_met: bool | None
     values: dict[str, str]
     failing_endpoints: list[dict[str, str]]
+
+    @property
+    def failing_endpoint_count(self) -> int | None:
+        """Total failing endpoints across setup/hold/pulse-width checks.
+
+        Sums the raw ``"TNS/THS/TPWS Failing Endpoints"`` strings already
+        in ``values`` so callers don't have to parse them individually.
+        Returns ``None`` (rather than 0) when none of the three could be
+        parsed as an integer, e.g. because ``values`` is empty.
+        """
+        counts = [
+            int(self.values[key])
+            for key in _FAILING_ENDPOINT_KEYS
+            if key in self.values and self.values[key].lstrip("-").isdigit()
+        ]
+        return sum(counts) if counts else None
+
+    @property
+    def has_violations(self) -> bool:
+        """Whether the report indicates any timing violation at all.
+
+        True if ``constraints_met is False``, or if any of the setup/
+        hold/pulse-width failing-endpoint counts is nonzero. False
+        otherwise, including when the report couldn't be parsed at all
+        (``constraints_met is None`` and no endpoint counts found) —
+        callers that need to distinguish "known clean" from "unknown"
+        should check ``constraints_met`` directly instead.
+        """
+        if self.constraints_met is False:
+            return True
+        return bool(self.failing_endpoint_count)
 
     def render(self, max_endpoints: int = 5) -> str:
         lines = []
