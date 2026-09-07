@@ -20,14 +20,18 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import __version__
+from .artifacts import find_artifacts, render_artifacts
+from .build_diagnostics import build_diagnostics
 from .capabilities import Capabilities, render_targets
 from .config import Config, ConfigError, load_config
+from .drc_report import DrcReportError, checks_found, get_drc_report
 from .inspect import inspect_sources, render_inspection
 from .project_config import ProjectConfig, ProjectConfigError, load_project_config
 from .project_runner import RunTimeoutError, run_build_script
 from .synth import SynthError, build_failure, build_success, chip_spec, synthesize
-from .timing import TimingReportError, get_timing_report
+from .timing import TimingReportError, get_timing_report, parse_timing_summary
 from .timing import run_name as timing_run_name
+from .utilization_report import UtilizationReportError, get_utilization_report
 
 mcp = MCPServer(
     "tsfpga_mcp",
@@ -50,9 +54,13 @@ mcp = MCPServer(
         "set netlist_builds=false on tsfpga_project_build for a top-level "
         "Vivado build (synth_only for synthesis-only, from_impl to resume "
         "into a full implementation run), then tsfpga_project_get_timing_report "
-        "for its Vivado timing summary (needs a 'vivado' executable, unlike "
-        "every other tool here). tsfpga_project_status reports what it "
-        "resolved to."
+        "(also: pulse_width/bus_skew/clock_interaction reports), "
+        "tsfpga_project_get_utilization_report (hierarchical breakdown), or "
+        "tsfpga_project_get_drc_report (drc/methodology) — all three need a "
+        "'vivado' executable, unlike every other tool here. Failed builds "
+        "get their Vivado ERROR/CRITICAL WARNING lines surfaced first; "
+        "successful full builds report bitstream artifact paths. "
+        "tsfpga_project_status reports what it resolved to."
     ),
 )
 
@@ -574,7 +582,12 @@ async def tsfpga_project_build(input: BuildInput) -> str:
     'synth_only' to stop after synthesis or 'from_impl' to resume a
     previously synth_only=true build into a full implementation
     (place & route + bitstream) run; call tsfpga_project_get_timing_report
-    afterwards for the timing summary.
+    afterwards for the timing summary. On success (full top-level builds
+    only, i.e. netlist_builds=false and synth_only=false), the paths of the
+    written bitstream artifacts ('.bit'/'.bin'/'.xsa') are listed. On
+    failure, every Vivado 'ERROR:'/'CRITICAL WARNING:' line (plus a little
+    surrounding context) is surfaced first, ahead of the full output, to
+    triage the root cause instead of it being buried in log noise.
 
     Parallelism: 'num_parallel_builds' runs several matched projects
     concurrently (one process each) and is the only knob that speeds up
@@ -603,17 +616,22 @@ async def tsfpga_project_build(input: BuildInput) -> str:
         return _err(exc)
     except Exception as exc:  # keep the tool's output contract consistent
         return f"Error: {exc}"
-    header = (
-        "Build succeeded.\n"
-        if result.ok
-        else f"Build failed (exit {result.returncode}).\n"
-    )
-    return (
-        header
-        + _parallelism_note(input)
-        + _vivado_only_flags_note(input)
-        + result.summary()
-    )
+    notes = _parallelism_note(input) + _vivado_only_flags_note(input)
+
+    if not result.ok:
+        header = f"Build failed (exit {result.returncode}).\n"
+        diagnostics = build_diagnostics(result.full_text)
+        diagnostics_section = f"{diagnostics}\n\n" if diagnostics else ""
+        return header + notes + diagnostics_section + result.summary()
+
+    header = "Build succeeded.\n"
+    artifacts_section = ""
+    if not input.netlist_builds and not input.synth_only:
+        artifacts = find_artifacts(result.full_text)
+        rendered = render_artifacts(artifacts)
+        if rendered:
+            artifacts_section = rendered + "\n\n"
+    return header + notes + artifacts_section + result.summary()
 
 
 class TimingReportInput(BaseModel):
@@ -648,14 +666,43 @@ class TimingReportInput(BaseModel):
             "run."
         ),
     )
+    report_type: Literal["summary", "pulse_width", "bus_skew", "clock_interaction"] = (
+        Field(
+            default="summary",
+            description=(
+                "Which Vivado timing-analysis report to get: 'summary' "
+                "(report_timing_summary, the overall setup/hold/pulse-"
+                "width summary — the only kind tsfpga itself ever writes "
+                "automatically, and only on a violation), 'pulse_width' "
+                "(report_pulse_width, minimum pulse width/clock period "
+                "checks), 'bus_skew' (report_bus_skew, skew across buses "
+                "with set_bus_skew constraints — empty unless the design "
+                "has any), or 'clock_interaction' (report_clock_"
+                "interaction, how each pair of clock domains is handled: "
+                "safe crossing, false path, unsafe, ...)."
+            ),
+        )
+    )
+    verbosity: Literal["full", "summary"] = Field(
+        default="full",
+        description=(
+            "Only affects report_type='summary'. 'full' (default) returns "
+            "a structured WNS/TNS/WHS/THS header (parsed from the report) "
+            "followed by the full raw report text. 'summary' returns just "
+            "the structured header — much shorter, use when you only need "
+            "to know whether timing is met and by how much, not the full "
+            "per-path detail."
+        ),
+    )
     force_regenerate: bool = Field(
         default=False,
         description=(
             "Always re-run Vivado to regenerate the report, even if a "
-            "timing_summary.rpt already exists on disk (written "
-            "automatically by tsfpga when a timing violation was "
-            "detected). Slower — spins up Vivado — but reflects the "
-            "current design instead of a possibly-stale cached file."
+            "cached one already exists on disk for this run (for "
+            "report_type='summary', tsfpga itself writes one "
+            "automatically when a timing violation was detected). "
+            "Slower — spins up Vivado — but reflects the current design "
+            "instead of a possibly-stale cached file."
         ),
     )
     timeout: float | None = Field(
@@ -667,23 +714,25 @@ class TimingReportInput(BaseModel):
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
 async def tsfpga_project_get_timing_report(input: TimingReportInput) -> str:
-    """Get the Vivado timing summary for one already-built project's run.
+    """Get a Vivado timing-analysis report for one already-built project's run.
 
     tsfpga only writes 'timing_summary.rpt' automatically when it detects
     a timing violation (setup/hold slack < 0, or an unsafe clock
     crossing) — a normal, timing-clean implementation build produces no
-    report at all. This tool covers that common case too: if no cached
-    report exists (or force_regenerate=true), it runs Vivado in batch mode
-    against the already-built project ('open_project' the .xpr,
-    'open_run' the requested synth_N/impl_N run, 'report_timing_summary')
-    and returns the result. This is the only tool that invokes Vivado
-    directly (the build tools never do — tsfpga does that internally),
-    and it needs the project already built via tsfpga_project_build first
-    (netlist_builds=false and synth_only=false for an impl_N run) plus a
-    'vivado' executable on PATH or TSFPGA_MCP_VIVADO set — check
-    tsfpga_project_status if that's unclear. Marked as not read-only since
-    regenerating the report runs Vivado, which writes files into the
-    project directory."""
+    report at all, and no report kind other than the default 'summary' is
+    ever written automatically. This tool covers all of those cases: if no
+    cached report exists (or force_regenerate=true), it runs Vivado in
+    batch mode against the already-built project ('open_project' the
+    .xpr, 'open_run' the requested synth_N/impl_N run, then the report
+    command for 'report_type') and returns the result. This is the only
+    tool (alongside tsfpga_project_get_utilization_report and
+    tsfpga_project_get_drc_report) that invokes Vivado directly (the build
+    tools never do — tsfpga does that internally), and it needs the
+    project already built via tsfpga_project_build first (netlist_builds=
+    false and synth_only=false for an impl_N run) plus a 'vivado'
+    executable on PATH or TSFPGA_MCP_VIVADO set — check tsfpga_project_status
+    if that's unclear. Marked as not read-only since regenerating the
+    report runs Vivado, which writes files into the project directory."""
     try:
         config = _get_project_config()
         result = await get_timing_report(
@@ -693,6 +742,7 @@ async def tsfpga_project_get_timing_report(input: TimingReportInput) -> str:
             synth_only=input.synth_only,
             force_regenerate=input.force_regenerate,
             timeout=input.timeout,
+            report_type=input.report_type,
         )
     except ProjectConfigError as exc:
         return _err(exc)
@@ -706,9 +756,208 @@ async def tsfpga_project_get_timing_report(input: TimingReportInput) -> str:
         "regenerated via Vivado" if result.regenerated else "cached from a previous run"
     )
     header = (
-        f"Timing report for {input.project!r} ({run}, {origin}), "
-        f"{result.report_file}:\n\n"
+        f"Timing report ({input.report_type}) for {input.project!r} ({run}, "
+        f"{origin}), {result.report_file}:\n\n"
     )
+    if input.report_type != "summary":
+        return header + result.report
+
+    structured = parse_timing_summary(result.report).render()
+    if input.verbosity == "summary":
+        return header + structured
+    return header + structured + "\n\nFull report:\n\n" + result.report
+
+
+class UtilizationReportInput(BaseModel):
+    """Input for tsfpga_project_get_utilization_report."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    project: str = Field(
+        min_length=1,
+        description=(
+            "Exact build project name (not a wildcard) — see "
+            "tsfpga_project_list_builds for the available names."
+        ),
+    )
+    run_index: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Vivado run index (the 'N' in synth_N/impl_N), matching "
+            "whatever 'run_index' the build used (tsfpga's own default "
+            "is 1)."
+        ),
+    )
+    synth_only: bool = Field(
+        default=False,
+        description=(
+            "Report on the post-synthesis run (synth_N) instead of the "
+            "post-implementation run (impl_N, the default). Post-"
+            "implementation utilization reflects placement/routing "
+            "optimizations and is usually the more useful of the two."
+        ),
+    )
+    hierarchical_depth: int = Field(
+        default=4,
+        ge=1,
+        description="How many levels of module hierarchy to break down.",
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        description=(
+            "Always re-run Vivado to regenerate the report, even if a "
+            "cached one already exists on disk for this run. Slower — "
+            "spins up Vivado — but reflects the current design instead of "
+            "a possibly-stale cached file."
+        ),
+    )
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this call only.",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def tsfpga_project_get_utilization_report(input: UtilizationReportInput) -> str:
+    """Get a hierarchical Vivado utilization report for one already-built
+    project's run (per-module LUT/FF/BRAM/DSP/... breakdown, 'hierarchical_
+    depth' levels deep). tsfpga itself already writes this at depth 4 for
+    every build (it's how tsfpga computes the top-level size it prints), so
+    the default 'hierarchical_depth=4' is normally served straight from
+    that existing file with no Vivado call at all. Any other depth (or
+    force_regenerate=True) runs Vivado in batch mode against the already-
+    built project ('open_project' the .xpr, 'open_run' the requested
+    synth_N/impl_N run, 'report_utilization -hierarchical') to produce its
+    own report, cached separately per depth. Needs the project already
+    built via tsfpga_project_build first; regenerating (non-default depth,
+    or force_regenerate) additionally needs a 'vivado' executable on PATH
+    or TSFPGA_MCP_VIVADO set. Marked as not read-only since regenerating
+    the report runs Vivado, which writes files into the project
+    directory."""
+    try:
+        config = _get_project_config()
+        result = await get_utilization_report(
+            config,
+            project=input.project,
+            run_index=input.run_index,
+            synth_only=input.synth_only,
+            force_regenerate=input.force_regenerate,
+            timeout=input.timeout,
+            hierarchical_depth=input.hierarchical_depth,
+        )
+    except ProjectConfigError as exc:
+        return _err(exc)
+    except (UtilizationReportError, RunTimeoutError) as exc:
+        return _err(exc)
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
+
+    run = timing_run_name(input.run_index, input.synth_only)
+    origin = "regenerated via Vivado" if result.regenerated else "cached"
+    header = (
+        f"Hierarchical utilization report for {input.project!r} ({run}, "
+        f"{origin}), {result.report_file}:\n\n"
+    )
+    return header + result.report
+
+
+class DrcReportInput(BaseModel):
+    """Input for tsfpga_project_get_drc_report."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    project: str = Field(
+        min_length=1,
+        description=(
+            "Exact build project name (not a wildcard) — see "
+            "tsfpga_project_list_builds for the available names."
+        ),
+    )
+    run_index: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Vivado run index (the 'N' in synth_N/impl_N), matching "
+            "whatever 'run_index' the build used (tsfpga's own default "
+            "is 1)."
+        ),
+    )
+    synth_only: bool = Field(
+        default=False,
+        description=(
+            "Report on the post-synthesis run (synth_N) instead of the "
+            "post-implementation run (impl_N, the default). Some DRC/"
+            "methodology checks only run meaningfully post-implementation."
+        ),
+    )
+    report_type: Literal["drc", "methodology"] = Field(
+        default="drc",
+        description=(
+            "'drc' (report_drc, physical/electrical design-rule "
+            "violations) or 'methodology' (report_methodology, design-"
+            "methodology best-practice checks, e.g. large setup "
+            "violations or missing constraints)."
+        ),
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        description=(
+            "Always re-run Vivado to regenerate the report, even if a "
+            "cached one already exists on disk for this run. Slower — "
+            "spins up Vivado — but reflects the current design instead of "
+            "a possibly-stale cached file."
+        ),
+    )
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override TSFPGA_MCP_PROJECT_TIMEOUT for this call only.",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def tsfpga_project_get_drc_report(input: DrcReportInput) -> str:
+    """Get a Vivado DRC or methodology report for one already-built
+    project's run. tsfpga never runs report_drc/report_methodology as part
+    of its own build flow, so this always runs Vivado in batch mode
+    against the already-built project ('open_project' the .xpr, 'open_run'
+    the requested synth_N/impl_N run, then 'report_drc' or
+    'report_methodology') unless a cached report from a previous call
+    already exists for this run. Needs the project already built via
+    tsfpga_project_build first plus a 'vivado' executable on PATH or
+    TSFPGA_MCP_VIVADO set. Marked as not read-only since regenerating the
+    report runs Vivado, which writes files into the project directory."""
+    try:
+        config = _get_project_config()
+        result = await get_drc_report(
+            config,
+            project=input.project,
+            run_index=input.run_index,
+            synth_only=input.synth_only,
+            force_regenerate=input.force_regenerate,
+            timeout=input.timeout,
+            report_type=input.report_type,
+        )
+    except ProjectConfigError as exc:
+        return _err(exc)
+    except (DrcReportError, RunTimeoutError) as exc:
+        return _err(exc)
+    except Exception as exc:  # keep the tool's output contract consistent
+        return f"Error: {exc}"
+
+    run = timing_run_name(input.run_index, input.synth_only)
+    origin = (
+        "regenerated via Vivado" if result.regenerated else "cached from a previous run"
+    )
+    header = (
+        f"{input.report_type.upper()} report for {input.project!r} ({run}, "
+        f"{origin}), {result.report_file}:\n\n"
+    )
+    count = checks_found(result.report)
+    if count is not None:
+        header += f"Checks found: {count}\n\n"
     return header + result.report
 
 

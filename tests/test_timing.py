@@ -19,11 +19,39 @@ from tsfpga_mcp.timing import (
     TimingReportError,
     build_tcl,
     get_timing_report,
+    parse_timing_summary,
     project_dir,
     run_dir,
     run_name,
     xpr_file,
 )
+
+_REAL_TIMING_SUMMARY_EXCERPT = """\
+---------------------------------------------------------
+| Design Timing Summary
+| ----------------------
+---------------------------------------------------------
+
+  WNS(ns)  TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints  WHS(ns)  \
+THS(ns)  THS Failing Endpoints  THS Total Endpoints  WPWS(ns)  TPWS(ns)  \
+TPWS Failing Endpoints  TPWS Total Endpoints
+  -------  -------  ----------------------  --------------------  \
+-------  -------  ----------------------  --------------------  --------  \
+--------  ----------------------  --------------------
+   -1.067   -9.836  12  144  0.045  0.000  0  120  2.000  0.000  0  116
+
+
+Timing constraints are not met.
+
+
+Max Delay Paths
+-----------------------------------------------------------------
+Slack (VIOLATED) :        -1.067ns  (required time - arrival time)
+  Source:                 input_source_synchronous_data[2]
+                            (input port clocked by \
+input_source_synchronous_clock  {rise@0.000ns fall@4.000ns period=8.000ns})
+  Destination:            input_source_synchronous_block.data_p1_reg[2]/D
+"""
 
 _FAKE_VIVADO = f"""\
 #!{sys.executable}
@@ -243,6 +271,95 @@ async def test_vivado_timeout(tmp_path: Path, fake_vivado, monkeypatch):
             synth_only=False,
             force_regenerate=False,
             timeout=0.2,
+        )
+
+
+def test_parse_timing_summary_extracts_header_and_endpoints():
+    summary = parse_timing_summary(_REAL_TIMING_SUMMARY_EXCERPT)
+    assert summary.constraints_met is False
+    assert summary.values["WNS(ns)"] == "-1.067"
+    assert summary.values["TNS Failing Endpoints"] == "12"
+    assert summary.values["THS(ns)"] == "0.000"
+    assert len(summary.failing_endpoints) == 1
+    ep = summary.failing_endpoints[0]
+    assert ep["slack"] == "-1.067"
+    assert ep["source"] == "input_source_synchronous_data[2]"
+    assert ep["destination"] == "input_source_synchronous_block.data_p1_reg[2]/D"
+
+
+def test_parse_timing_summary_render_contains_key_fields():
+    rendered = parse_timing_summary(_REAL_TIMING_SUMMARY_EXCERPT).render()
+    assert "NOT MET" in rendered
+    assert "WNS(ns): -1.067" in rendered
+    assert "slack -1.067ns:" in rendered
+
+
+def test_parse_timing_summary_unparseable_text_is_graceful():
+    summary = parse_timing_summary("not a real timing report at all")
+    assert summary.constraints_met is None
+    assert summary.values == {}
+    assert summary.failing_endpoints == []
+    assert "could not determine" in summary.render()
+
+
+def test_build_tcl_report_type_pulse_width(tmp_path: Path):
+    tcl = build_tcl(
+        tmp_path / "p.xpr",
+        "impl_1",
+        tmp_path / "pulse_width.rpt",
+        report_type="pulse_width",
+    )
+    assert "report_pulse_width" in tcl
+    assert "pulse_width.rpt" in tcl
+
+
+async def test_get_timing_report_pulse_width(tmp_path: Path, monkeypatch):
+    script = f"""\
+#!{sys.executable}
+import re
+import sys
+
+content = open(sys.argv[-1], encoding="utf-8").read()
+match = re.search(r'report_pulse_width[^\\n]*-file "([^"]+)"', content)
+assert match, content
+with open(match.group(1), "w", encoding="utf-8") as f:
+    f.write("Pulse Width Report\\n")
+"""
+    fake = tmp_path / "fake_vivado_pw.py"
+    fake.write_text(script, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+    projects_path = _make_build(tmp_path, "counter")
+    cfg = _cfg(tmp_path, projects_path=projects_path, vivado=str(fake))
+
+    result = await get_timing_report(
+        cfg,
+        project="counter",
+        run_index=1,
+        synth_only=False,
+        force_regenerate=False,
+        timeout=None,
+        report_type="pulse_width",
+    )
+
+    assert result.regenerated
+    assert "Pulse Width Report" in result.report
+    assert result.report_file.name == "pulse_width.rpt"
+
+
+async def test_get_timing_report_invalid_report_type(tmp_path: Path):
+    projects_path = _make_build(tmp_path, "counter")
+    cfg = _cfg(tmp_path, projects_path=projects_path)
+
+    with pytest.raises(TimingReportError, match="Invalid report_type"):
+        await get_timing_report(
+            cfg,
+            project="counter",
+            run_index=1,
+            synth_only=False,
+            force_regenerate=False,
+            timeout=None,
+            report_type="bogus",
         )
 
 

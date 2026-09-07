@@ -69,7 +69,7 @@ async def test_timing_report_success(monkeypatch, tmp_path, fake_vivado):
         server.TimingReportInput(project="counter")
     )
 
-    assert "Timing report for 'counter' (impl_1" in result
+    assert "Timing report (summary) for 'counter' (impl_1" in result
     assert "regenerated via Vivado" in result
     assert "WNS" in result
 
@@ -131,3 +131,171 @@ async def test_project_status_reports_missing_vivado(monkeypatch, tmp_path):
 
     assert "not found" in result
     assert "TSFPGA_MCP_VIVADO" in result
+
+
+_FAKE_VIVADO_REAL_SUMMARY = f"""\
+#!{sys.executable}
+import re
+import sys
+
+content = open(sys.argv[-1], encoding="utf-8").read()
+match = re.search(r'report_timing_summary[^\\n]*-file "([^"]+)"', content)
+with open(match.group(1), "w", encoding="utf-8") as f:
+    f.write('''\\
+---------------------------------------------------------
+| Design Timing Summary
+| ----------------------
+---------------------------------------------------------
+
+  WNS(ns)  TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints  WHS(ns)  \\
+THS(ns)  THS Failing Endpoints  THS Total Endpoints  WPWS(ns)  TPWS(ns)  \\
+TPWS Failing Endpoints  TPWS Total Endpoints
+  -------  -------  ----------------------  --------------------  \\
+-------  -------  ----------------------  --------------------  --------  \\
+--------  ----------------------  --------------------
+   -1.067   -9.836  12  144  0.045  0.000  0  120  2.000  0.000  0  116
+
+
+Timing constraints are not met.
+''')
+"""
+
+
+@pytest.fixture
+def fake_vivado_real_summary(tmp_path: Path) -> Path:
+    script = tmp_path / "fake_vivado_real.py"
+    script.write_text(_FAKE_VIVADO_REAL_SUMMARY, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+async def test_timing_report_structured_header_in_full_verbosity(
+    monkeypatch, tmp_path, fake_vivado_real_summary
+):
+    config = _install_config(
+        monkeypatch, tmp_path, vivado=str(fake_vivado_real_summary)
+    )
+    _make_build(config, "counter")
+
+    result = await server.tsfpga_project_get_timing_report(
+        server.TimingReportInput(project="counter")
+    )
+
+    assert "Timing constraints: NOT MET" in result
+    assert "WNS(ns): -1.067" in result
+    assert "Full report:" in result
+
+
+async def test_timing_report_summary_verbosity_omits_full_report(
+    monkeypatch, tmp_path, fake_vivado_real_summary
+):
+    config = _install_config(
+        monkeypatch, tmp_path, vivado=str(fake_vivado_real_summary)
+    )
+    _make_build(config, "counter")
+
+    result = await server.tsfpga_project_get_timing_report(
+        server.TimingReportInput(project="counter", verbosity="summary")
+    )
+
+    assert "Timing constraints: NOT MET" in result
+    assert "Full report:" not in result
+
+
+async def test_timing_report_pulse_width_type(monkeypatch, tmp_path):
+    script = f"""\
+#!{sys.executable}
+import re
+import sys
+
+content = open(sys.argv[-1], encoding="utf-8").read()
+match = re.search(r'report_pulse_width[^\\n]*-file "([^"]+)"', content)
+with open(match.group(1), "w", encoding="utf-8") as f:
+    f.write("Pulse Width Report\\n")
+"""
+    fake = tmp_path / "fake_vivado_pw.py"
+    fake.write_text(script, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    config = _install_config(monkeypatch, tmp_path, vivado=str(fake))
+    _make_build(config, "counter")
+
+    result = await server.tsfpga_project_get_timing_report(
+        server.TimingReportInput(project="counter", report_type="pulse_width")
+    )
+
+    assert "Timing report (pulse_width)" in result
+    assert "Pulse Width Report" in result
+    # Non-summary report types are returned raw, no structured header.
+    assert "Timing constraints" not in result
+
+
+async def test_utilization_report_success(monkeypatch, tmp_path):
+    script = f"""\
+#!{sys.executable}
+import re
+import sys
+
+content = open(sys.argv[-1], encoding="utf-8").read()
+match = re.search(r'report_utilization[^\\n]*-file "([^"]+)"', content)
+with open(match.group(1), "w", encoding="utf-8") as f:
+    f.write("Utilization by Hierarchy\\n")
+"""
+    fake = tmp_path / "fake_vivado_util.py"
+    fake.write_text(script, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    config = _install_config(monkeypatch, tmp_path, vivado=str(fake))
+    _make_build(config, "counter")
+
+    result = await server.tsfpga_project_get_utilization_report(
+        server.UtilizationReportInput(project="counter")
+    )
+
+    assert "Hierarchical utilization report" in result
+    assert "Utilization by Hierarchy" in result
+
+
+async def test_drc_report_success(monkeypatch, tmp_path):
+    script = f"""\
+#!{sys.executable}
+import re
+import sys
+
+content = open(sys.argv[-1], encoding="utf-8").read()
+match = re.search(r'report_drc[^\\n]*-file "([^"]+)"', content)
+with open(match.group(1), "w", encoding="utf-8") as f:
+    f.write("Report DRC\\nChecks found: 2\\n")
+"""
+    fake = tmp_path / "fake_vivado_drc.py"
+    fake.write_text(script, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    config = _install_config(monkeypatch, tmp_path, vivado=str(fake))
+    _make_build(config, "counter")
+
+    result = await server.tsfpga_project_get_drc_report(
+        server.DrcReportInput(project="counter")
+    )
+
+    assert "DRC report" in result
+    assert "Checks found: 2" in result
+
+
+async def test_drc_report_project_not_built(monkeypatch, tmp_path):
+    _install_config(monkeypatch, tmp_path, vivado=None)
+
+    result = await server.tsfpga_project_get_drc_report(
+        server.DrcReportInput(project="counter")
+    )
+
+    assert result.startswith("Error:")
+    assert "Build" in result
+
+
+async def test_utilization_report_project_not_built(monkeypatch, tmp_path):
+    _install_config(monkeypatch, tmp_path, vivado=None)
+
+    result = await server.tsfpga_project_get_utilization_report(
+        server.UtilizationReportInput(project="counter")
+    )
+
+    assert result.startswith("Error:")
+    assert "Build" in result
