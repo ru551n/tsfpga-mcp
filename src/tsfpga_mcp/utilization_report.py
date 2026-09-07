@@ -19,8 +19,19 @@ cache on ``report_type``).
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 from .project_config import ProjectConfig
 from .vivado_common import ReportResult, VivadoReportError, get_or_regenerate_report
+
+__all__ = [
+    "REPORT_FILENAME",
+    "UtilizationReportError",
+    "UtilizationSummary",
+    "get_utilization_report",
+    "parse_utilization_summary",
+]
 
 # The depth tsfpga itself always uses when it writes this report.
 _TSFPGA_DEFAULT_DEPTH = 4
@@ -100,3 +111,168 @@ async def get_utilization_report(
         )
     except VivadoReportError as exc:
         raise UtilizationReportError(str(exc)) from exc
+
+
+# --- Structured "Utilization by Hierarchy" table parsing --------------------
+
+# Vivado's report_utilization -hierarchical output is a single ASCII table
+# (bordered by "+---+" rules) whose first two columns are always "Instance"
+# and "Module" — the remaining resource columns vary by Vivado version and
+# device family (older releases: "Slice LUTs"/"Slice Registers"/"BRAM Tile"/
+# "DSPs"; newer ones (seen from an actual 2026.1 run): "Total LUTs"/
+# "Logic LUTs"/"LUTRAMs"/"SRLs"/"FFs"/"RAMB36"/"RAMB18"/"DSP Blocks"). The
+# first data row is always the top-level instance (the whole design), with
+# every other row nested underneath it.
+_HIER_TABLE_RE = re.compile(
+    r"\+-+(?:\+-+)+\+\n"
+    r"\|(?P<header>[^\n]*\bInstance\b[^\n]*\bModule\b[^\n]*)\|\n"
+    r"\+-+(?:\+-+)+\+\n"
+    r"(?P<rows>(?:\|[^\n]*\|\n)+?)"
+    r"\+-+(?:\+-+)+\+",
+)
+
+# Known aliases for the commonly-present resource categories, newest/most
+# specific first. Anything not covered here is still preserved verbatim in
+# UtilizationSummary.values.
+_LUT_ALIASES = ("Slice LUTs", "Total LUTs", "LUTs")
+_REGISTER_ALIASES = ("Slice Registers", "FFs", "Registers")
+_DSP_ALIASES = ("DSPs", "DSP48Es", "DSP48s", "DSP Blocks")
+_BRAM_TILE_ALIASES = ("Block RAM Tile", "BRAM Tile", "Block RAM")
+
+
+def _split_row(line: str) -> list[str]:
+    """Split one "| a | b | c |" table row/header line into stripped cells."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _first_present(values: dict[str, str], names: tuple[str, ...]) -> str | None:
+    for name in names:
+        if name in values:
+            return values[name]
+    return None
+
+
+def _to_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _to_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _block_ram_tiles(values: dict[str, str]) -> float | None:
+    direct = _to_float(_first_present(values, _BRAM_TILE_ALIASES))
+    if direct is not None:
+        return direct
+    ramb36 = _to_int(values.get("RAMB36"))
+    ramb18 = _to_int(values.get("RAMB18"))
+    if ramb36 is None and ramb18 is None:
+        return None
+    # A RAMB18 is half a Block RAM Tile (a RAMB36 is a whole one) — this is
+    # how Vivado itself defines "Block RAM Tile" utilization.
+    return (ramb36 or 0) + (ramb18 or 0) * 0.5
+
+
+@dataclass(frozen=True)
+class UtilizationSummary:
+    top_instance: str | None
+    top_module: str | None
+    slice_luts: int | None
+    slice_registers: int | None
+    block_ram_tiles: float | None
+    dsps: int | None
+    values: dict[str, str]
+    hierarchy: list[dict[str, str]]
+
+    def render(self) -> str:
+        if self.top_instance is None:
+            return "Utilization summary: could not determine from report text."
+        lines = [
+            f"Top-level utilization ({self.top_instance!r}, "
+            f"module {self.top_module!r}):"
+        ]
+        if self.slice_luts is not None:
+            lines.append(f"  LUTs: {self.slice_luts}")
+        if self.slice_registers is not None:
+            lines.append(f"  Registers/FFs: {self.slice_registers}")
+        if self.block_ram_tiles is not None:
+            lines.append(f"  Block RAM tiles: {self.block_ram_tiles:g}")
+        if self.dsps is not None:
+            lines.append(f"  DSPs: {self.dsps}")
+        if len(self.hierarchy) > 1:
+            lines.append(
+                f"Hierarchy breakdown: {len(self.hierarchy)} instances "
+                "(see full report for per-instance detail)."
+            )
+        return "\n".join(lines)
+
+
+def parse_utilization_summary(report: str) -> UtilizationSummary:
+    """Extract the top-level resource totals from a hierarchical utilization report.
+
+    Best-effort text parsing of ``report_utilization -hierarchical`` output.
+    Returns an "unknown" summary (all fields ``None``/empty) rather than
+    raising when the report doesn't look as expected, so callers can always
+    fall back to showing the raw report.
+    """
+    table_match = _HIER_TABLE_RE.search(report)
+    if not table_match:
+        return UtilizationSummary(
+            top_instance=None,
+            top_module=None,
+            slice_luts=None,
+            slice_registers=None,
+            block_ram_tiles=None,
+            dsps=None,
+            values={},
+            hierarchy=[],
+        )
+
+    header = _split_row(table_match.group("header"))
+    row_lines = [
+        line for line in table_match.group("rows").split("\n") if line.strip()
+    ]
+    hierarchy: list[dict[str, str]] = []
+    for line in row_lines:
+        cells = _split_row(line)
+        if len(cells) == len(header):
+            hierarchy.append(dict(zip(header, cells, strict=True)))
+
+    if not hierarchy:
+        return UtilizationSummary(
+            top_instance=None,
+            top_module=None,
+            slice_luts=None,
+            slice_registers=None,
+            block_ram_tiles=None,
+            dsps=None,
+            values={},
+            hierarchy=[],
+        )
+
+    top = hierarchy[0]
+    return UtilizationSummary(
+        top_instance=top.get("Instance"),
+        top_module=top.get("Module"),
+        slice_luts=_to_int(_first_present(top, _LUT_ALIASES)),
+        slice_registers=_to_int(_first_present(top, _REGISTER_ALIASES)),
+        block_ram_tiles=_block_ram_tiles(top),
+        dsps=_to_int(_first_present(top, _DSP_ALIASES)),
+        values=top,
+        hierarchy=hierarchy,
+    )
