@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,24 @@ def test_non_positive_timeout(monkeypatch, project):
         load_project_config()
 
 
+def test_vivado_env_override(monkeypatch, project, tmp_path):
+    fake = tmp_path / "vivado"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.setenv("TSFPGA_MCP_VIVADO", str(fake))
+    cfg = load_project_config()
+    assert cfg.vivado == str(fake)
+
+
+def test_vivado_defaults_to_path_lookup(monkeypatch, project):
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.delenv("TSFPGA_MCP_VIVADO", raising=False)
+    cfg = load_project_config()
+    # Whatever shutil.which("vivado") finds (likely None in this sandbox);
+    # just check it's not left unset/crashing and matches PATH lookup.
+    assert cfg.vivado == shutil.which("vivado")
+
+
 def test_python_prefers_project_venv(monkeypatch, project):
     venv_bin = project / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
@@ -124,3 +143,75 @@ def test_python_prefers_project_venv(monkeypatch, project):
     monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
     cfg = load_project_config()
     assert cfg.python == str(py)
+
+
+# --- project virtualenv -------------------------------------------------------
+
+
+def _make_venv(root: Path) -> Path:
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    exe = root / "bin" / "python3"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+    return exe
+
+
+def test_existing_project_venv_is_used_and_recorded(monkeypatch, project):
+    exe = _make_venv(project / ".venv")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    cfg = load_project_config()
+    assert cfg.venv == project / ".venv"
+    assert cfg.python == str(exe)
+    assert cfg.venv_notes == ()
+
+
+def test_no_venv_and_nothing_to_create_from(monkeypatch, project):
+    """Degrades to the PATH interpreter, with a note explaining why."""
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    cfg = load_project_config()
+    assert cfg.venv is None
+    assert cfg.python
+    assert any("requirements.txt" in note for note in cfg.venv_notes)
+
+
+def test_auto_venv_off_skips_creation(monkeypatch, project):
+    (project / "requirements.txt").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_AUTO_VENV", "0")
+    cfg = load_project_config()
+    assert cfg.venv is None
+    assert not (project / ".venv").exists()
+    assert cfg.venv_notes == ("virtualenv auto-creation disabled",)
+
+
+def test_explicit_python_never_provisions_but_still_activates(monkeypatch, project):
+    """TSFPGA_MCP_PROJECT_PYTHON is authoritative; if it lives in a venv,
+    that venv is activated for the subprocess rather than merely executed."""
+    exe = _make_venv(project / "other_venv")
+    (project / "requirements.txt").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_PYTHON", str(exe))
+    cfg = load_project_config()
+    assert cfg.python == str(exe)
+    assert cfg.venv == project / "other_venv"
+    assert not (project / ".venv").exists()
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-5"])
+def test_invalid_venv_timeout(monkeypatch, project, value):
+    (project / "requirements.txt").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_VENV_TIMEOUT", value)
+    with pytest.raises(ProjectConfigError, match="TSFPGA_MCP_PROJECT_VENV_TIMEOUT"):
+        load_project_config()
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
+def test_missing_venv_is_created_from_requirements(monkeypatch, project):
+    (project / "requirements.txt").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TSFPGA_MCP_PROJECT_DIR", str(project))
+    cfg = load_project_config()
+    assert cfg.venv == project / ".venv"
+    assert cfg.python.startswith(str(project / ".venv"))
+    assert any("created" in note for note in cfg.venv_notes)
