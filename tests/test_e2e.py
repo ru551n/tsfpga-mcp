@@ -186,6 +186,63 @@ async def test_synthesis_failure_reports_diagnostics(e2e):
     assert "Diagnostics:" in result
 
 
+async def test_hierarchy_vhdl_top_with_verilog_submodule(e2e):
+    """Mixed language: VHDL top, Verilog submodule — the instance ('u',
+    bound to 'vand') must show up in the resolved hierarchy."""
+    result = await server.tsfpga_hierarchy(
+        server.HierarchyInput(sources=[WRAPPER, VAND], top="wrapper")
+    )
+    assert result.startswith("Hierarchy OK"), result
+    assert "wrapper" in result
+    assert "vand" in result
+
+
+async def test_hierarchy_vhdl_top_generic_override(e2e):
+    result = await server.tsfpga_hierarchy(
+        server.HierarchyInput(
+            sources=[COUNTER], top="counter", generics={"WIDTH": "8"}
+        )
+    )
+    assert result.startswith("Hierarchy OK"), result
+    assert "counter" in result
+    assert "8" in result or "no synthesis run" in result
+
+
+async def test_hierarchy_verilog_top_with_vhdl_entity(e2e):
+    """Mixed language: Verilog top, VHDL unit made available via vhdl_entities."""
+    result = await server.tsfpga_hierarchy(
+        server.HierarchyInput(
+            sources=[VSUB, VTOP], top="vtop", vhdl_entities=["vsub"]
+        )
+    )
+    assert result.startswith("Hierarchy OK"), result
+    assert "vtop" in result
+    assert "vsub" in result
+
+
+async def test_hierarchy_cross_library_vhdl_reference(e2e):
+    """Top uses 'library leaf_lib; entity leaf_lib.leaf' to cross into a
+    sibling library — the resolved hierarchy must show both."""
+    result = await server.tsfpga_hierarchy(
+        server.HierarchyInput(
+            sources=[LIB_TOP], libraries={"leaf_lib": [LIB_LEAF]}, top="libtop"
+        )
+    )
+    assert result.startswith("Hierarchy OK"), result
+    assert "libtop" in result
+    assert "leaf" in result
+
+
+async def test_hierarchy_failure_reports_diagnostics(e2e):
+    """A nonexistent top level must surface as FAILED with diagnostics —
+    same contract as tsfpga_synthesize."""
+    result = await server.tsfpga_hierarchy(
+        server.HierarchyInput(sources=[COUNTER], top="bogus_top")
+    )
+    assert result.startswith("Hierarchy elaboration FAILED"), result
+    assert "Diagnostics:" in result
+
+
 async def test_status_tool(e2e):
     result = await server.tsfpga_status()
     assert "tsfpga-mcp" in result
