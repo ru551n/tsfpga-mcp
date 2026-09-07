@@ -25,8 +25,8 @@ from tsfpga_mcp.timing import (
     xpr_file,
 )
 
-_FAKE_VIVADO = """\
-#!/usr/bin/env python3
+_FAKE_VIVADO = f"""\
+#!{sys.executable}
 import os
 import re
 import sys

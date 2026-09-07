@@ -17,8 +17,8 @@ import tsfpga_mcp.server as server
 from tsfpga_mcp.project_config import ProjectConfig
 from tsfpga_mcp.timing import project_dir, run_dir
 
-_FAKE_VIVADO = """\
-#!/usr/bin/env python3
+_FAKE_VIVADO = f"""\
+#!{sys.executable}
 import os
 import re
 import sys
