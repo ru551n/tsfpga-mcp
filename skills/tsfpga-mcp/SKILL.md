@@ -80,7 +80,10 @@ the wrong thing.
 | `tsfpga_synthesize` | Runs the synthesis and returns the resource counts or `Synthesis FAILED` with diagnostics. | one GHDL + yosys run |
 | `tsfpga_project_status` | Project-mode config: resolved project dir, build script, interpreter, projects path, timeout. Call first to confirm what it resolved to (defaults to whichever of `build.py`/`build_fpga.py` exists in the current working directory). | free |
 | `tsfpga_project_list_builds` | Lists the project's own build projects (`build.py --list-only`), netlist builds by default. Use to find project name filters. | one subprocess call |
-| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds). | one full build subprocess |
+| `tsfpga_project_build` | Builds project(s) by running the project's own build script (netlist builds by default). Returns pass/fail plus the build's own output (utilization report included for netlist builds); on success (full top-level builds only) lists the written bitstream artifact paths, on failure surfaces every Vivado `ERROR:`/`CRITICAL WARNING:` line (plus context) first. | one full build subprocess |
+| `tsfpga_project_get_timing_report` | Timing-analysis report for an already-built project's run: `report_type` = `summary` (default, with a structured WNS/TNS/WHS/THS header + worst failing endpoints), `pulse_width`, `bus_skew`, or `clock_interaction`. Regenerates via Vivado batch mode when no cached report exists. | one Vivado batch run (or free if cached) |
+| `tsfpga_project_get_utilization_report` | Hierarchical per-module utilization (LUT/FF/BRAM/DSP/...) `hierarchical_depth` levels deep. Default depth (4) is normally free — tsfpga already writes that file for every build; other depths regenerate via Vivado. | free at default depth, else one Vivado batch run |
+| `tsfpga_project_get_drc_report` | DRC or methodology report (`report_type`: `drc`/`methodology`) for an already-built project's run. tsfpga never writes either automatically, so this always regenerates via Vivado unless a cached report from a previous call exists. | one Vivado batch run (or free if cached) |
 
 ## `tsfpga_synthesize` inputs
 - `sources` — HDL files (`.vhd`/`.vhdl` and/or `.v`/`.sv`) of the design,
@@ -113,7 +116,9 @@ the wrong thing.
 - `tsfpga_project_status` — no inputs.
 - `tsfpga_project_list_builds`: `netlist_builds` (default `true`), `project_filters` (wildcards, e.g. `["*canny*"]`, empty = all).
 - `tsfpga_project_build`: `project_filters` (wildcards, empty = all — call `tsfpga_project_list_builds` first so "all" is an informed choice), `netlist_builds` (default `true`), `use_existing_project` (default `true`, faster iteration; set `false` to force a clean re-create), `num_parallel_builds` (projects built concurrently, tsfpga default `8` — the only parallelism knob netlist builds have, so it only helps when the filters match several projects), `num_threads_per_build` (threads inside one build process, tsfpga default `4`; top-level/Vivado builds only — Yosys netlist synthesis is single-threaded and ignores it, and the tool says so if you set it anyway), `synth_only` (top-level/Vivado builds only: stop after synthesis, no place & route/bitstream — a no-op for netlist builds, which are always synthesis-only already), `from_impl` (resume a prior `synth_only=true` top-level build into a full implementation run instead of starting over; mutually exclusive with `synth_only`, requires `use_existing_project=true`), `timeout` (override for this call).
-- `tsfpga_project_get_timing_report`: `project` (exact build name, required — not a wildcard), `run_index` (default `1`, matches the `N` in `synth_N`/`impl_N`), `synth_only` (report on the `synth_N` run instead of `impl_N` — use for netlist builds and for top-level builds that were themselves built with `synth_only=true`), `force_regenerate` (default `false`; re-run Vivado even if a cached `timing_summary.rpt` exists), `timeout` (override for this call).
+- `tsfpga_project_get_timing_report`: `project` (exact build name, required — not a wildcard), `run_index` (default `1`, matches the `N` in `synth_N`/`impl_N`), `synth_only` (report on the `synth_N` run instead of `impl_N` — use for netlist builds and for top-level builds that were themselves built with `synth_only=true`), `report_type` (`summary` default, `pulse_width`, `bus_skew`, `clock_interaction`), `verbosity` (`full` default or `summary` — `summary` only affects `report_type=summary` and returns just the structured WNS/TNS/WHS/THS header + worst failing endpoints, not the full raw report), `force_regenerate` (default `false`; re-run Vivado even if a cached report exists), `timeout` (override for this call).
+- `tsfpga_project_get_utilization_report`: `project` (required), `run_index` (default `1`), `synth_only` (default `false`), `hierarchical_depth` (default `4` — matches what tsfpga itself already writes, so this depth is normally served free with no Vivado call; any other value regenerates and caches separately), `force_regenerate`, `timeout`.
+- `tsfpga_project_get_drc_report`: `project` (required), `run_index` (default `1`), `synth_only` (default `false`), `report_type` (`drc` default or `methodology`), `force_regenerate`, `timeout`. Response includes a `Checks found: N` line parsed from the report when present.
 
 All default to whichever of `build.py`/`build_fpga.py` exists in
 the server's current working directory (`build.py` wins if both do), no
@@ -127,7 +132,9 @@ what else is configurable (`TSFPGA_MCP_PROJECT_PYTHON`,
 
 ### Project virtualenv
 The project's own `.venv`/`venv` is always used **and activated** for the build
-script (and for Vivado in `tsfpga_project_get_timing_report`): `VIRTUAL_ENV`
+script (and for Vivado in the `tsfpga_project_get_timing_report`/
+`tsfpga_project_get_utilization_report`/`tsfpga_project_get_drc_report`
+tools): `VIRTUAL_ENV`
 set, `<venv>/bin` first on `PATH`, `PYTHONHOME` cleared, this server's own venv
 removed. If the project has no venv, one is created with uv from
 `pyproject.toml` (`uv sync`) or `requirements.txt`, under a cross-process lock
@@ -142,19 +149,38 @@ Build projects are written to `TSFPGA_MCP_PROJECTS_PATH`
 project name there will clobber each other. Give each agent its own path, or
 better, its own git worktree (then the cwd defaults are already disjoint).
 
-### Timing reports (top-level/Vivado builds only)
-tsfpga only writes `timing_summary.rpt` automatically when it detects a
-timing violation (setup/hold slack < 0, or an unsafe clock crossing) — a
-normal, timing-clean implementation build produces **no report at all**.
-`tsfpga_project_get_timing_report` covers that common case too: absent a
-cached report (or with `force_regenerate=true`), it runs Vivado itself in
-batch mode (`open_project`/`open_run`/`report_timing_summary`) against the
-already-built project and returns the result. This needs the project
-already built via `tsfpga_project_build` (`netlist_builds=false` and
-`synth_only=false` for an `impl_N` run) plus a `vivado` executable on
-`PATH` or `TSFPGA_MCP_VIVADO` set — check `tsfpga_project_status` if
-that's unclear. It is the only tool in this server that invokes Vivado
-directly (the build tools never do — tsfpga does that internally).
+### Vivado reports on demand (top-level/Vivado builds only)
+Three tools invoke Vivado directly (the build tools never do — tsfpga does
+that internally) to get reports beyond what a build itself produces:
+`tsfpga_project_get_timing_report`, `tsfpga_project_get_utilization_report`,
+`tsfpga_project_get_drc_report`. All need the project already built via
+`tsfpga_project_build` (`netlist_builds=false` and `synth_only=false` for an
+`impl_N` run) plus a `vivado` executable on `PATH` or `TSFPGA_MCP_VIVADO`
+set — check `tsfpga_project_status` if that's unclear.
+
+Which reports tsfpga writes automatically differs per kind, and drives
+whether a call is free (reads a cached file) or spins up Vivado:
+- **Only on a violation** (`timing_summary.rpt`, `pulse_width.rpt`,
+  `bus_skew.rpt`, `clock_interaction.rpt`): a normal, timing-clean
+  implementation build produces **no report at all** for any of these — a
+  clean run always means `tsfpga_project_get_timing_report` regenerates
+  via Vivado batch mode (`open_project`/`open_run`/the matching
+  `report_*` command).
+- **Always, for every build** (`hierarchical_utilization.rpt`, at depth
+  4): `tsfpga_project_get_utilization_report`'s default
+  `hierarchical_depth=4` is therefore normally free (reads that existing
+  file, no Vivado call) — only a different depth, or
+  `force_regenerate=true`, triggers regeneration (cached separately per
+  depth so different depths never collide).
+- **Never** (DRC, methodology): `tsfpga_project_get_drc_report` always
+  regenerates via Vivado unless a previous call for the same run/type
+  already cached one.
+
+For `tsfpga_project_get_timing_report` with the default `report_type=
+summary`, prefer `verbosity=summary` when you only need to know whether
+timing is met and by how much — it skips the full per-path report and
+returns just the parsed WNS/TNS/WHS/THS numbers plus the worst failing
+endpoints.
 
 ## Output shape
 
@@ -235,3 +261,25 @@ only, no port-level netlist dump). Say so if asked; suggest
    real GHDL/yosys/build error; do not fall back to `tsfpga_synthesize`
    to "work around" a project build failure — that would synthesize
    different sources than the project actually builds.
+
+**"Build/implement <project> for real" / "does it meet timing?" / "what's
+the bitstream path?" (top-level Vivado build)**
+1. `tsfpga_project_build(project_filters=[...], netlist_builds=false)` —
+   full implementation by default (`synth_only=true` to stop after
+   synthesis first, e.g. for a quick utilization/timing look before
+   committing to place & route). On failure, the surfaced
+   `ERROR:`/`CRITICAL WARNING:` lines are the root cause — read those
+   first, don't dig through the full output. On success, the listed
+   bitstream artifact paths (`.bit`/`.bin`/`.xsa`) answer "where's the
+   bitstream" directly.
+2. "Does it meet timing?" → `tsfpga_project_get_timing_report(project=...,
+   verbosity="summary")` for a quick WNS/TNS/WHS/THS + worst-endpoints
+   answer; drop `verbosity` (or set `report_type` to `pulse_width`/
+   `bus_skew`/`clock_interaction`) for the full report or a specific
+   check.
+3. "How is the design's resources broken down / which module is biggest?"
+   → `tsfpga_project_get_utilization_report(project=...)` (free at the
+   default depth 4; increase `hierarchical_depth` for finer-grained
+   detail, at the cost of a Vivado run).
+4. "Any DRC/methodology issues?" → `tsfpga_project_get_drc_report(
+   project=..., report_type="drc")` (or `"methodology"`).

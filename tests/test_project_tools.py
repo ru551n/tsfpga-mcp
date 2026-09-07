@@ -144,6 +144,87 @@ async def test_vivado_flags_warning_lists_both(calls):
     assert "'from_impl' only apply to top-level" in result
 
 
+async def test_build_failure_surfaces_vivado_diagnostics(monkeypatch, tmp_path):
+    script = tmp_path / "build_fpga.py"
+    script.write_text("")
+    config = ProjectConfig(
+        project_dir=tmp_path,
+        build_script=script,
+        python="python3",
+        projects_path=tmp_path / "projects",
+        timeout=60.0,
+    )
+    monkeypatch.setattr(server, "_project_config", config)
+
+    async def fake_run(cfg, args, *, timeout=None):
+        return RunResult(
+            returncode=1,
+            stdout="some noise\nERROR: [Synth 8-1] bad thing\nmore noise\n",
+            stderr="",
+            argv=list(args),
+        )
+
+    monkeypatch.setattr(server, "run_build_script", fake_run)
+
+    result = await server.tsfpga_project_build(server.BuildInput(netlist_builds=False))
+
+    assert "Build failed" in result
+    assert "1 ERROR(s), 0 CRITICAL WARNING(s) found:" in result
+    assert "ERROR: [Synth 8-1] bad thing" in result
+
+
+async def test_build_success_reports_artifacts(monkeypatch, tmp_path):
+    output_path = tmp_path / "projects" / "counter"
+    output_path.mkdir(parents=True)
+    (output_path / "counter.bit").write_bytes(b"bits")
+    (output_path / "counter.bin").write_bytes(b"bin")
+
+    script = tmp_path / "build_fpga.py"
+    script.write_text("")
+    config = ProjectConfig(
+        project_dir=tmp_path,
+        build_script=script,
+        python="python3",
+        projects_path=tmp_path / "projects",
+        timeout=60.0,
+    )
+    monkeypatch.setattr(server, "_project_config", config)
+
+    async def fake_run(cfg, args, *, timeout=None):
+        return RunResult(
+            returncode=0,
+            stdout=(
+                f"Building Vivado project in {tmp_path}/projects/counter/project, "
+                f"placing artifacts in {output_path}\n"
+            ),
+            stderr="",
+            argv=list(args),
+        )
+
+    monkeypatch.setattr(server, "run_build_script", fake_run)
+
+    result = await server.tsfpga_project_build(server.BuildInput(netlist_builds=False))
+
+    assert "Build succeeded" in result
+    assert "Artifacts:" in result
+    assert str(output_path / "counter.bit") in result
+    assert str(output_path / "counter.bin") in result
+
+
+async def test_build_success_no_artifacts_section_for_netlist(calls):
+    result = await server.tsfpga_project_build(
+        server.BuildInput(project_filters=["counter"])
+    )
+    assert "Artifacts:" not in result
+
+
+async def test_build_success_no_artifacts_section_for_synth_only(calls):
+    result = await server.tsfpga_project_build(
+        server.BuildInput(netlist_builds=False, synth_only=True)
+    )
+    assert "Artifacts:" not in result
+
+
 def test_project_config_unused_path_is_a_path(tmp_path: Path):
     # Guards the fixture above against ProjectConfig field drift.
     assert isinstance(
